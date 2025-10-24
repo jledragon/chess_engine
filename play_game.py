@@ -19,6 +19,7 @@ import os
 BATCH_SIZE = 1
 
 def is_pawn_promote_move(batched_board, prev_x, prev_y, x, y, colour_list):
+    # Deprecated - Use new C++ function.
     enc = batched_board[0, :, prev_y, prev_x]
     piece_enc_sum = torch.sum(enc[0:5])
     # If we're a pawn moving to the end of the board...

@@ -49,6 +49,12 @@ def get_game_over_message(game_over_for_batch, colour_list):
         elif game_over_for_batch[4]:
             return "No progress made in a while. It's a draw!"
 
+def get_all_binary_moves(batch_size):
+    all_moves = torch.arange(0, 4096).unsqueeze(0).cuda()
+    all_moves = all_moves.repeat(batch_size, 1)
+    mask = 2**torch.arange(11, -1, -1).to(all_moves.device, all_moves.dtype)
+    return all_moves.unsqueeze(-1).bitwise_and(mask).ne(0).float()
+
 @compile_if_supported
 def flip_board(batched_board, colour_list):
     # Flip the colours anywhere we have a piece
@@ -111,6 +117,18 @@ def get_repetition_status(boards, batched_board):
     compact_pos = torch.sum(char_pos * power_mask, 1).to(torch.int8).cpu()
     repetition_status = boards.check_threefold_repetition(compact_pos)
     return repetition_status
+
+@compile_if_supported
+def get_single_board_encoding(batched_board):
+    assert batched_board.shape[0] == 1, "Only boards with batch size 1 are supported."
+    p64 = torch.ones((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
+    p128 = torch.zeros((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
+    char_pos = torch.cat((batched_board[:, 0:6, :, :], p64, p128), dim=1)
+    sq_num = torch.arange(0, 8).cuda()
+    power_mask = torch.pow(2, sq_num).unsqueeze(1).unsqueeze(1).unsqueeze(0)
+    compact_pos = torch.sum(char_pos * power_mask, 1).to(torch.int8).cpu()
+    board_encoding = chess_cpp.get_board_encoding(compact_pos, 0)  # Just check the first element
+    return board_encoding
 
 @compile_if_supported
 def is_game_over(batched_board, move_layer, repetition_status, dud_move_count):
@@ -207,6 +225,24 @@ def reset_colour_list(colour_list, is_game_over):
 def possibly_reset_game(batched_board, is_game_over, starting_position):
     batched_board[is_game_over] = starting_position
     return batched_board
+
+@compile_if_supported
+def expand_all_moves(single_board, move_layer_for_board):
+    flat_moves = move_layer_for_board.reshape((move_layer_for_board.shape[0] * move_layer_for_board.shape[1]))
+    legal_moves = torch.where(flat_moves == 1)[0].unsqueeze(1)
+    ft1 = legal_moves // 64
+    ft2 = legal_moves % 64
+    f1 = ft1 // 8
+    t1 = ft1 % 8
+    f2 = ft2 // 8
+    t2 = ft2 % 8
+    all_possible_moves = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
+    copied_boards = single_board.unsqueeze(0).repeat(all_possible_moves.shape[0], 1, 1, 1)
+    is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards, all_possible_moves)
+    default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(all_possible_moves.shape[0], 1).to(torch.int8).cuda()
+    expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
+    expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
+    return expanded_boards, expanded_promotions
 
 def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
     assert len(move) == 1  # Only do this in Python for a single batch.

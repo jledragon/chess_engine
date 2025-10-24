@@ -16,6 +16,9 @@ void getValidBlockingSquares(torch::Tensor board, torch::Tensor blockList, const
 void getStalemates(torch::Tensor board, torch::Tensor gameOverList, torch::Tensor stalemateList, const int batch_size, const int boardSize, const int encodingSize);
 void selectRandomMoves(torch::Tensor flatMoves, torch::Tensor randomMove, torch::Tensor selectedMoves, const int batch_size, const int boardSize);
 void enactMoves(torch::Tensor board, torch::Tensor selectedMoves, torch::Tensor pawnPromotions, torch::Tensor moveCount, const int batch_size, const int boardSize, const int encodingSize);
+void getWherePromotion(torch::Tensor all_boards, torch::Tensor move_per_board, torch::Tensor isPromotion, const int batch_size, const int boardSize, const int encodingSize);
+void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromotions, torch::Tensor promoteMask, const int batch_size);
+void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tensor promoteMask, const int batch_size, const int boardSize, const int encodingSize);
 
 // C++ interface
 
@@ -291,6 +294,13 @@ class BatchedBoard {
         }
 };
 
+std::string get_board_encoding(torch::Tensor compact_pos, int bNum) {
+    int8_t* int8_pos_batch = compact_pos[bNum].contiguous().data_ptr<int8_t>();
+    char* char_pos_batch = reinterpret_cast<char*>(int8_pos_batch);
+    std::string moveStr(char_pos_batch, (num_rows + 2) * pos_encoding);
+    return moveStr;
+}
+
 torch::Tensor get_moves_for_player(torch::Tensor board) {
     // Let moves be defined as ints between 0 and 4095. Let their definition be 64*(start) + end.
     // Let start or end be defined as 8*row (letter) + col (number).
@@ -350,6 +360,42 @@ torch::Tensor get_random_valid_move_per_game(torch::Tensor flatMoves, torch::Ten
     return selectedMoves;
 }
 
+torch::Tensor get_pawn_promote_move_mask(torch::Tensor all_boards, torch::Tensor move_per_board) {
+    // Get a boolean mask of moves that are pawn promotions.
+    const int batch_size = move_per_board.sizes()[0];
+    std::vector<int64_t> tensor_size = {batch_size};
+    auto options = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
+    torch::Tensor isPromotion = torch::zeros(tensor_size, options);
+    getWherePromotion(all_boards, move_per_board, isPromotion, batch_size, num_rows, bits_per_piece);
+    return isPromotion;
+}
+
+torch::Tensor expand_promotions(torch::Tensor promotion_per_board, torch::Tensor promoteMask) {
+    // Make the promotion vector larger - increase it with the full range of promotions where promoteMask is True.
+    at::Tensor numPromotions = promoteMask.sum();
+    const int numPromotions_i = numPromotions.item<int>();
+    const int oldBatchSize = promotion_per_board.sizes()[0];
+    const int newBatchSize = oldBatchSize + numPromotions_i * 3;
+    std::vector<int64_t> tensor_size = {newBatchSize, 4};
+    auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCUDA);
+    torch::Tensor newPromotions = torch::zeros(tensor_size, options);
+    expandPromotions(promotion_per_board, newPromotions, promoteMask, oldBatchSize);
+    return newPromotions;
+}
+
+torch::Tensor expand_boards(torch::Tensor all_boards, torch::Tensor promoteMask) {
+    // Make the boards vector larger - extend it an extra 3x where promoteMask is True.
+    at::Tensor numPromotions = promoteMask.sum();
+    const int numPromotions_i = numPromotions.item<int>();
+    const int oldBatchSize = all_boards.sizes()[0];
+    const int newBatchSize = oldBatchSize + numPromotions_i * 3;
+    std::vector<int64_t> tensor_size = {newBatchSize, all_boards.sizes()[1], all_boards.sizes()[2], all_boards.sizes()[3]};
+    auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCUDA);
+    torch::Tensor newBoards = torch::zeros(tensor_size, options);
+    expandBoards(all_boards, newBoards, promoteMask, oldBatchSize, num_rows, bits_per_piece);
+    return newBoards;
+}
+
 void enact_moves(torch::Tensor board, torch::Tensor selected_moves, torch::Tensor pawn_promotions, torch::Tensor move_count) {
     const int batch_size = board.sizes()[0];
     enactMoves(board, selected_moves, pawn_promotions, move_count, batch_size, num_rows, bits_per_piece);
@@ -384,6 +430,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("get_squares_in_check_for_player", &get_squares_in_check_for_player, "get_squares_in_check_for_player");
     m.def("get_valid_blocking_squares_player", &get_valid_blocking_squares_player, "get_valid_blocking_squares_player");
     m.def("get_random_valid_move_per_game", &get_random_valid_move_per_game, "get_random_valid_move_per_game");
+    m.def("get_pawn_promote_move_mask", &get_pawn_promote_move_mask, "get_pawn_promote_move_mask");
+    m.def("expand_promotions", &expand_promotions, "expand_promotions");
+    m.def("expand_boards", &expand_boards, "expand_boards");
     m.def("enact_moves", &enact_moves, "enact_moves");
     m.def("is_stalemate", &is_stalemate, "is_stalemate");
+    m.def("get_board_encoding", &get_board_encoding, "get_board_encoding");
 }

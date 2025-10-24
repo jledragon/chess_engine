@@ -986,6 +986,89 @@ template<typename scalar_t> __global__ void enactMoves_cu(scalar_t* __restrict__
     }
 }
 
+template<typename scalar_t> __global__ void getWherePromotion_cu(scalar_t* __restrict__ all_boards, scalar_t* __restrict__ move_per_board, bool* __restrict__ isPromotion, const int boardSize, const int encodingSize) {
+    int thisBatch = blockIdx.x;
+    int thisBoard = thisBatch * encodingSize * boardSize * boardSize;
+    int thisMove = thisBatch * 4;  // 4 is the move length.
+    int fromY = move_per_board[thisMove];
+    int fromX = move_per_board[thisMove + 1];
+    int toY = move_per_board[thisMove + 2];
+    int fromPos = fromY * boardSize + fromX;
+    if (all_boards[thisBoard + 0 * boardSize * boardSize + fromPos] == 1 &&  // Check for a pawn of our colour
+        all_boards[thisBoard + 1 * boardSize * boardSize + fromPos] == 0 &&
+        all_boards[thisBoard + 2 * boardSize * boardSize + fromPos] == 0 &&
+        all_boards[thisBoard + 3 * boardSize * boardSize + fromPos] == 0 &&
+        all_boards[thisBoard + 4 * boardSize * boardSize + fromPos] == 0 &&
+        all_boards[thisBoard + 5 * boardSize * boardSize + fromPos] == 0 &&
+        toY == 7) {  // Check that it's going to the end of the board.
+        isPromotion[thisBatch] = 1;
+    }
+}
+
+template<typename scalar_t> __global__ void expandPromotions_cu(scalar_t* __restrict__ promotion_per_board, scalar_t* __restrict__ newPromotions, bool* __restrict__ promoteMask) {
+    int thisBatch = blockIdx.x;
+    int thisArea = thisBatch * 4;
+    int newIndex = 0;
+    for (int i=0; i<thisBatch; i++) {
+        newIndex += 1;
+        if (promoteMask[i] == 1) {
+            newIndex += 3;
+        }
+    }
+    int newArea = newIndex * 4;
+    if (promoteMask[thisBatch] == 1) {
+        newPromotions[newArea] = 1;
+        newPromotions[newArea + 1] = 0;
+        newPromotions[newArea + 2] = 0;
+        newPromotions[newArea + 3] = 0;
+        
+        newPromotions[newArea + 4] = 0;
+        newPromotions[newArea + 5] = 1;
+        newPromotions[newArea + 6] = 0;
+        newPromotions[newArea + 7] = 0;
+        
+        newPromotions[newArea + 8] = 0;
+        newPromotions[newArea + 9] = 0;
+        newPromotions[newArea + 10] = 1;
+        newPromotions[newArea + 11] = 0;
+        
+        newPromotions[newArea + 12] = 0;
+        newPromotions[newArea + 13] = 0;
+        newPromotions[newArea + 14] = 0;
+        newPromotions[newArea + 15] = 1;
+    }
+    else {
+        for (int i=0; i<4; i++) {
+            newPromotions[newArea + i] = promotion_per_board[thisArea + i];
+        }
+    }
+}
+
+template<typename scalar_t> __global__ void expandBoards_cu(scalar_t* __restrict__ all_boards, scalar_t* __restrict__ newBoards, bool* __restrict__ promoteMask, const int boardSize, const int encodingSize) {
+    int thisBatch = blockIdx.x;
+    int thisArea = thisBatch * encodingSize * boardSize * boardSize;
+    int newIndex = 0;
+    for (int i=0; i<thisBatch; i++) {
+        newIndex += 1;
+        if (promoteMask[i] == 1) {
+            newIndex += 3;
+        }
+    }
+    int newArea = newIndex * encodingSize * boardSize * boardSize;
+    if (promoteMask[thisBatch] == 1) {
+        for (int j=0; j<4; j++) {
+            for (int i=0; i<encodingSize * boardSize * boardSize; i++) {
+                newBoards[newArea + i + j * encodingSize * boardSize * boardSize] = all_boards[thisArea + i];
+            }
+        }
+    }
+    else {
+        for (int i=0; i<encodingSize * boardSize * boardSize; i++) {
+            newBoards[newArea + i] = all_boards[thisArea + i];
+        }
+    }
+}
+
 void getMoves(torch::Tensor board, torch::Tensor moveLayer, const int batch_size, const int boardSize, const int encodingSize) {
     size_t threadsPerBlock = boardSize * boardSize; // Could go up to 256. Number of squares (64).
     size_t numberOfBlocks = batch_size; // Could go up to 2176. Batch size (256).
@@ -1136,6 +1219,52 @@ void enactMoves(torch::Tensor board, torch::Tensor selectedMoves, torch::Tensor 
             selectedMoves.data<scalar_t>(),
             pawnPromotions.data<scalar_t>(),
             moveCount.data<scalar_t>(),
+            boardSize,
+            encodingSize
+		);
+    }));
+
+	cudaDeviceSynchronize();
+}
+
+void getWherePromotion(torch::Tensor all_boards, torch::Tensor move_per_board, torch::Tensor isPromotion, const int batch_size, const int boardSize, const int encodingSize) {
+    size_t numberOfBlocks = batch_size;
+
+    AT_DISPATCH_INTEGRAL_TYPES(move_per_board.type(), "getWherePromotion_cu", ([&] {
+        getWherePromotion_cu<scalar_t><<<numberOfBlocks, 1>>>(
+            all_boards.data<scalar_t>(),
+            move_per_board.data<scalar_t>(),
+            isPromotion.data<bool>(),
+            boardSize,
+            encodingSize
+		);
+    }));
+
+	cudaDeviceSynchronize();
+}
+
+void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromotions, torch::Tensor promoteMask, const int batch_size) {
+    size_t numberOfBlocks = batch_size;
+
+    AT_DISPATCH_INTEGRAL_TYPES(promotion_per_board.type(), "expandPromotions_cu", ([&] {
+        expandPromotions_cu<scalar_t><<<numberOfBlocks, 1>>>(
+            promotion_per_board.data<scalar_t>(),
+            newPromotions.data<scalar_t>(),
+            promoteMask.data<bool>()
+		);
+    }));
+
+	cudaDeviceSynchronize();
+}
+
+void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tensor promoteMask, const int batch_size, const int boardSize, const int encodingSize) {
+    size_t numberOfBlocks = batch_size;
+
+    AT_DISPATCH_INTEGRAL_TYPES(all_boards.type(), "expandBoards_cu", ([&] {
+        expandBoards_cu<scalar_t><<<numberOfBlocks, 1>>>(
+            all_boards.data<scalar_t>(),
+            newBoards.data<scalar_t>(),
+            promoteMask.data<bool>(),
             boardSize,
             encodingSize
 		);

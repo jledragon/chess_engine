@@ -7,13 +7,16 @@ Created on Sun Nov  5 18:39:05 2023
 Run this file with environment "jle".
 """
 
+import math
+import time
 import torch
 import chess_cpp
-import time
+import argparse
 from stockfish import Stockfish
 from random import random
 from abc import ABC, abstractmethod
 import platform
+import numpy as np
 from chess_py_utils import (
     get_repetition_status,
     is_game_over,
@@ -28,10 +31,11 @@ from chess_py_utils import (
     get_human_readable_board,
     flip_episode,
     get_firepower_score,
-    compile_if_supported
+    compile_if_supported,
+    get_single_board_encoding
     #get_moves_for_player_with_reuse
 )
-from neural_networks import DQNChessNetwork
+from neural_networks import DQNChessNetwork, A2CChessNetwork
 
 BATCH_SIZE = 256
 
@@ -82,19 +86,11 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
         return rewards
     
     @abstractmethod
-    def store_training_artifacts(self, store_bundle, move_num):
-        pass
-    
-    @abstractmethod
     def prepare_for_training(self):
         pass
     
     @abstractmethod
     def prepare_for_evaluation(self):
-        pass
-    
-    @abstractmethod
-    def train_step(self, epoch):
         pass
     
     @abstractmethod
@@ -105,6 +101,14 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
     def load_all_models(self):
         pass
 
+    @abstractmethod
+    def train_step(self, epoch):
+        pass
+
+    @abstractmethod
+    def self_play_and_training_session(self, boards, start_epoch):
+        pass
+
     def log_stockfish_move(self, move, board_state, starting_colour_me):
         """
         Record to the JLE game state what the Stockfish move was.
@@ -112,22 +116,12 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
         jle_move, jle_promotion = convert_UCI_to_jle_notation(move, starting_colour_me)
         return self.enact_move((jle_move, jle_promotion), board_state)
     
-    def store_current_artifacts(self, current_state, action, rewards, terminals):
-        self.previous_state = self.current_opponent_state
-        self.previous_action = self.opponent_action
-        self.previous_rewards = self.opponent_rewards
-        self.previous_terminals = self.opponent_terminals
-        self.current_opponent_state = current_state
-        self.opponent_action = action
-        self.opponent_rewards = rewards
-        self.opponent_terminals = terminals
-    
     @compile_if_supported
     def enact_move(self, move, board_state):
-        randomly_selected_move, random_promotion = move
+        selected_move, promotion = move
         board_tensor, colour_list, dud_move_count = board_state
         # Do the move
-        chess_cpp.enact_moves(board_tensor, randomly_selected_move, random_promotion, dud_move_count)
+        chess_cpp.enact_moves(board_tensor, selected_move, promotion, dud_move_count)
         # Flip the board to opponent view
         flipped_board, inv_colour_list = flip_board(board_tensor, colour_list)
         # Log this position (white's view) for threefold repetition check
@@ -147,7 +141,17 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
         board_tensor = flipped_board
         board_tensor = possibly_reset_game(board_tensor, game_over, self.starting_position)
         
-        return (randomly_selected_move, random_promotion), (dud_move_count, board_tensor, colour_list, opponent_move_layer, game_over_tensor)
+        return (selected_move, promotion), (dud_move_count, board_tensor, colour_list, opponent_move_layer, game_over_tensor)
+
+    @compile_if_supported
+    def reset_all(self, board_state):
+        board_tensor, colour_list, dud_move_count = board_state
+        game_over_all = torch.ones((board_tensor.shape[0])).cuda().to(torch.bool)
+        self.boards.reset_repetitions(game_over_all)
+        reset_move_counts(dud_move_count, game_over_all)
+        reset_colour_list(colour_list, game_over_all)
+        board_tensor = possibly_reset_game(board_tensor, game_over_all, self.starting_position)
+        return board_tensor, colour_list, dud_move_count
 
 
 class StockfishMoveAgent(AIMoveAgent):
@@ -332,6 +336,16 @@ class DQNMoveAgent(JLEAIMoveAgent):
         self.q_network.set_test_mode()
         self.q_network.prev_eps = self.q_network.eps
         self.q_network.eps = 0
+
+    def store_current_artifacts(self, current_state, action, rewards, terminals):
+        self.previous_state = self.current_opponent_state
+        self.previous_action = self.opponent_action
+        self.previous_rewards = self.opponent_rewards
+        self.previous_terminals = self.opponent_terminals
+        self.current_opponent_state = current_state
+        self.opponent_action = action
+        self.opponent_rewards = rewards
+        self.opponent_terminals = terminals
     
     def store_training_artifacts(self, dqn_store_bundle, opponent_move_layer):
         current_state, move, promotion, rewards, game_over = dqn_store_bundle
@@ -356,7 +370,38 @@ class DQNMoveAgent(JLEAIMoveAgent):
             self.q_network.eps = 0.05
         if epoch == 2100:
             for group in self.q_network.optimiser.param_groups:
-                group['lr'] = 1e-5
+                group['lr'] = group['lr'] * 0.1
+
+    def self_play_and_training_session(self, boards, start_epoch):
+        """
+        Play an AI against itself and train on past data.
+        """
+        batched_board = boards.to_tensor().cuda()
+        dud_move_count = boards.get_starting_move_count_list()
+        colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
+        total_games = 0
+        
+        #now = time.time()
+        end_epoch = start_epoch + 100
+        for move_num in range(start_epoch, end_epoch):
+            self.q_network.set_test_mode()
+            current_state = batched_board.clone()
+            (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
+                self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
+            rewards = self.apply_all_rewards(game_over_tensor, (batched_board, opponent_move_layer))
+            game_over = torch.any(game_over_tensor, dim=1)
+            # Store state, action, rewards, terminals and next state to the buffer.
+            self.store_training_artifacts((current_state, move, promotion, rewards, game_over), opponent_move_layer)
+            if move_num >= 100:
+                self.q_network.set_train_mode()
+                self.train_step(move_num)
+            games_done = torch.sum(game_over.to(torch.int8))
+            total_games += games_done
+            print(move_num)
+        #elapsed = time.time() - now
+        #print(elapsed)
+        print(self.q_network.eps, start_epoch)
+        return end_epoch
 
     def decide_move(self, board_state):
         board_tensor, _, _ = board_state
@@ -372,6 +417,316 @@ class DQNMoveAgent(JLEAIMoveAgent):
     
     def load_all_models(self):
         self.q_network.load_models('train')
+
+
+class MCTSNode:
+    """
+    A single node in MCTS representing a state and its attributes for MCTS.
+    """
+    
+    def __init__(self, current_board, moves_for_state, terminal_status):
+        self.N = 0  # Number of times an action has been taken from this state.
+        self.W = 0  # Value of the next state.
+        self.Q = 0  # Mean value of the next state.
+        self.P = None  # Prior probabilities of selecting each action.
+        self.valid_actions = None
+        self.state_value = None
+        self.children = []
+        # Required values for rollout below
+        self.is_leaf = True
+        self.rollout_done = False
+        self.current_board = current_board
+        self.moves_for_state = moves_for_state
+        self.terminal_status = terminal_status
+        self.model_move = None
+        self.state_value = None
+    
+    def update_actions_and_values(self, valid_actions, action_probs, state_value):
+        self.P = action_probs
+        self.valid_actions = valid_actions
+        self.state_value = state_value
+    
+    def add_predictions(self, model_move, pred_value):
+        # Add the predictions that led us to this state. This saves us a lot of computation time by batching up model predictions.
+        self.model_move = model_move
+        self.pred_value = pred_value
+    
+    def set_non_leaf(self):
+        self.is_leaf = False
+        self.current_board = None
+        self.moves_for_state = None
+        self.model_move = None
+        self.pred_value = None
+
+
+class MCTSGraph:
+    """
+    A graph of the Monte Carlo Tree Search (MCTS) for the current game, with the
+    current state as the top-level node. This graph should be wiped when starting
+    a new game with A2C.
+    """
+    
+    def __init__(self, agent, boards):
+        self.top_node = None
+        self.depth = 800  # Hard coded.
+        self.agent = agent
+        self.model = agent.model
+        self.always_queen = torch.tensor([[0, 0, 0, 1]]).to(torch.int8).cuda()
+        self.boards = boards
+        self.value_mask = torch.tensor([1, 0, -1]).to(torch.int8).cuda()
+        self.temperature = 1
+
+    def reset_graph(self):
+        self.top_node = None
+    
+    @compile_if_supported
+    def init_top_node(self, current_board, moves_for_state):
+        not_terminal = torch.zeros((3)).to(torch.bool).cuda()  # No win, no loss, no draw
+        self.top_node = MCTSNode(current_board, moves_for_state, not_terminal)
+
+        # Special - only do this for the first move of the game.
+        self.top_node.rollout_done = True
+        with torch.no_grad():
+            model_move, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
+            self.top_node.add_predictions(model_move, state_value)
+            valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(model_move, state_value, moves_for_state)
+            predicted_value = predicted_value.squeeze(0)
+            self.top_node.update_actions_and_values(valid_actions, action_probs, predicted_value)
+    
+    @compile_if_supported
+    def rollout(self, node):
+        # "Rollout" compared to traditional MCTS means predict the value from the model, unless the ground truth terminal gives better information.
+        node.rollout_done = True
+        with torch.no_grad():
+            moves_for_state = node.moves_for_state
+            valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(node.model_move, node.pred_value, moves_for_state)
+            
+            # Deal with the current state's value.
+            state_value = self.value_mask[node.terminal_status]
+            state_value = predicted_value if state_value.shape[0] == 0 else state_value
+            assert not state_value.shape[0] > 1, "Error - node end state had more than one outcome."
+            node.update_actions_and_values(valid_actions, action_probs, state_value)
+
+    @compile_if_supported
+    def generate_children(self, node):
+        with torch.no_grad():
+            current_board = node.current_board
+            valid_actions = node.valid_actions
+            num_actions = valid_actions.shape[0]
+            multi_prom = self.always_queen.repeat(num_actions, 1)  # Current behaviour. Deal with promotions later.
+
+            # Enact each action on copies of the board.
+            multi_board = current_board.repeat(num_actions, 1, 1, 1)
+            colour_list = torch.ones((num_actions)).to(torch.bool).cuda()  # We are always us, or "white" when considering expansion.
+            boards.update_batch_size(num_actions)
+            dud_move_count = boards.get_starting_move_count_list()
+            (_, _), (dud_move_count, board_tensor_half, colour_list, opponent_move_layer, game_over_tensor_1) = \
+                self.agent.enact_move((valid_actions, multi_prom), (multi_board, colour_list, dud_move_count))
+            we_won = torch.unsqueeze(game_over_tensor_1[:, 0], 1)
+            
+            # Find and enact the best opponent move to complete the state transition.
+            best_opponent_move = self.model.get_best_opponent_move(board_tensor_half[:,:6,:,:], opponent_move_layer)
+            (_, _), (dud_move_count, next_board_tensor, colour_list, my_next_move_layer, game_over_tensor_2) = \
+                self.agent.enact_move((best_opponent_move, multi_prom), (board_tensor_half, colour_list, dud_move_count))
+            we_lost = torch.unsqueeze(game_over_tensor_2[:, 0], 1)
+            we_drew = torch.unsqueeze(torch.logical_or(torch.any(game_over_tensor_1[:, 1:], axis=1), torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
+
+            terminals = torch.cat((we_won, we_lost, we_drew), axis=1)
+            pred_moves, pred_values = self.model.get_model_move_and_state(next_board_tensor[:,:6,:,:])
+            # Register the children for this node.
+            for act_num in range(num_actions):
+                state = torch.unsqueeze(next_board_tensor[act_num], 0)
+                move = torch.unsqueeze(my_next_move_layer[act_num], 0)
+                term = terminals[act_num]
+                child_node = MCTSNode(state, move, term)
+                child_node.add_predictions(torch.unsqueeze(pred_moves[act_num], 0), pred_values[act_num])
+                node.children.append(child_node)
+        node.set_non_leaf()
+    
+    def get_ucbi(self, node, parent):
+        return node.Q + 2 * math.sqrt(math.log(parent.N) / node.N)
+    
+    def get_max_ucbi_node(self, current_state):
+        ucbi_scores = []
+        for child in current_state.children:
+            if child.N == 0:
+                ucbi_scores.append(float('inf'))
+            else:
+                ucbi_scores.append(self.get_ucbi(child, current_state))
+        highest_score = max(ucbi_scores)
+        return current_state.children[ucbi_scores.index(highest_score)]
+
+    def generate_graph(self):
+        # Compilation time is 2 minutes or longer, so disable this if debugging.
+        # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
+        with torch.no_grad():
+            for _ in range(0, self.depth):
+                current_state = self.top_node
+                # Find the next node to roll out and then do so.
+                backup_states = [current_state]
+                while not current_state.is_leaf:
+                    current_state = self.get_max_ucbi_node(current_state)
+                    backup_states.append(current_state)
+                if not current_state.rollout_done:
+                    self.rollout(current_state)
+                if current_state.N >= 1:
+                    self.generate_children(current_state)
+
+                # Backpropagate
+                value = current_state.state_value
+                for back_state in backup_states:
+                    back_state.N = back_state.N + 1
+                    back_state.W = back_state.W + value
+                    back_state.Q = back_state.W / back_state.N
+    
+    def choose_move(self, is_training):
+        child_n_values = [child.N for child in self.top_node.children]
+        if is_training:
+            temperature_values = [(n / self.top_node.N) ** self.temperature for n in child_n_values]
+            sum_temp = sum(temperature_values)
+            norm_temp = [t / sum_temp for t in temperature_values]
+            choice = np.random.choice(len(norm_temp), 1, p=norm_temp)
+            return self.top_node.valid_actions[choice]
+        else:
+            highest_n = max(child_n_values)
+            return self.top_node.valid_actions[child_n_values.index(highest_n)]
+
+
+class A2CMoveAgent(JLEAIMoveAgent):
+    """
+    An agent that will use the A3C algorithm with a single processor, i.e. without
+    the "asynchronous" part, turning it into the simpler A2C algorithm.
+    """
+
+    def __init__(self, boards, starting_position, enabled_optional_rewards):
+        self.boards = boards
+        self.starting_position = starting_position
+        self.white_values_buffer = []
+        self.white_rewards_buffer = []
+        self.black_values_buffer = []
+        self.black_rewards_buffer = []
+        self.model = A2CChessNetwork()
+        self.training = True
+        self.whites_move = True  # True is white, False is black. We can reason this way with a batch size of 1.
+        self.win_reward = 100.0 / 100.0 # 100
+        self.lose_reward = -100 / 100.0 # -100
+        self.move_reward = -1 / 100.0
+        self.max_episode_length = 256
+        self.wins = 0
+        self.losses = 0
+        self.white_mcts = MCTSGraph(self, boards)
+        self.black_mcts = MCTSGraph(self, boards)
+
+    def end_episode(self):
+        self.whites_move = True
+        self.white_values_buffer.clear()
+        self.white_rewards_buffer.clear()
+        self.black_values_buffer.clear()
+        self.black_rewards_buffer.clear()
+        # torch.cuda.empty_cache()  # Dodgy - nvidia-smi is all over the place with this.
+
+    def start_episode(self):
+        self.model.resync_models()
+        self.white_mcts.reset_graph()
+        self.black_mcts.reset_graph()
+
+    def decide_move(self, board_state):
+        board_tensor, _, _ = board_state
+        # Get the moves
+        move_layer = chess_cpp.get_moves_for_player(board_tensor)
+        # Choose a move
+        print("Debug - Choose a move.")
+        if self.training:
+            if self.whites_move:
+                self.white_mcts.init_top_node(board_tensor, move_layer)
+                #a2c_move, a2c_promotion, game_value, entropy, log_prob = self.model.get_move(state, move_layer)  # The old way (07/07/2024)
+                self.white_mcts.generate_graph()  # The new way.
+                self.white_mcts.init_top_node(board_tensor, move_layer)
+                next_move = self.white_mcts.choose_move(is_training=True)
+                # Next to do 21/12/2024:
+                # Use the "Choice" node as the new top node. Retain the graph from there.
+                # Update the MCTS code to use the current selected node, rather than always starting from the universal top node.
+                # Speed up generating graph more, perhaps?
+                # Decide how I compute the loss function after that.
+                assert False
+            else:
+                self.black_mcts.update_state(board_tensor)
+                a2c_move, a2c_promotion = get_random_move(board_tensor, move_layer)
+                #self.black_values_buffer.append((state.cpu(), game_value.cpu(), entropy.cpu(), log_prob.cpu()))
+        return (a2c_move, a2c_promotion)
+
+    def _get_my_rewards(self, game_over_tensor, opponent_move_layer):
+        rewards = torch.where(game_over_tensor[:,0], self.win_reward, self.move_reward).cpu()
+        if self.whites_move:
+            if game_over_tensor[:, 0]:
+                self.wins += 1
+            self.white_rewards_buffer.append(rewards)
+        else:
+            self.black_rewards_buffer.append(rewards)
+
+    def _update_opponent_rewards(self, game_over_tensor, opponent_move_layer):
+        if len(self.black_rewards_buffer) > 0:
+            losses_opp = game_over_tensor[:, 0]
+            if losses_opp:
+                if self.whites_move:
+                    self.black_rewards_buffer[-1] += self.lose_reward
+                else:
+                    self.losses += 1
+                    self.white_rewards_buffer[-1] += self.lose_reward
+
+    def prepare_for_training(self):
+        self.training = True
+        self.model.set_train_mode()
+
+    def prepare_for_evaluation(self):
+        self.training = False
+        self.model.set_test_mode()
+
+    def save_all_models(self):
+        self.model.save_models()
+
+    def load_all_models(self):
+        self.model.load_models('train')
+
+    def train_step(self, epoch, game_over):
+        self.model.update_network(self.white_values_buffer, self.black_values_buffer, self.white_rewards_buffer, self.black_rewards_buffer, game_over)
+        #if epoch == 2100:
+        #    for group in self.model.optimiser.param_groups:
+        #        group['lr'] = group['lr'] * 0.1
+
+    def self_play_and_training_session(self, boards, start_epoch):
+        """
+        Plays a game against itself (a full episode) and then learns on the data.
+        """
+        boards.update_batch_size(1)
+        batched_board = boards.to_tensor().cuda()
+        dud_move_count = boards.get_starting_move_count_list()
+        colour_list = torch.ones((1)).to(torch.bool).cuda()
+        
+        end_epoch = start_epoch + 500
+        self.wins = 0
+        self.losses = 0
+        for move_num in range(start_epoch, end_epoch):
+            game_over = False
+            episode_length = 0
+            self.start_episode()
+            while not game_over:
+                (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
+                    self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
+                self.apply_all_rewards(game_over_tensor, (batched_board, opponent_move_layer))
+                game_over = torch.any(game_over_tensor, dim=1)
+                self.whites_move = not self.whites_move
+                episode_length += 1
+                if episode_length >= self.max_episode_length:
+                    batched_board, colour_list, dud_move_count = self.reset_all((batched_board, colour_list, dud_move_count))
+                    break
+            episode_length = 0
+            self.train_step(move_num, game_over)
+            self.end_episode()
+            print(move_num)
+        print(f"Wins {self.wins}, Losses {self.losses}")
+        
+        return end_epoch
 
 
 class RandomMoveAgent(JLEAIMoveAgent):
@@ -394,15 +749,15 @@ class RandomMoveAgent(JLEAIMoveAgent):
     def _update_opponent_rewards(self, game_over_tensor, game_state_bundle):
         pass
     
-    def store_training_artifacts(self, random_store_bundle, move_num):
-        pass
-    
     def prepare_for_training(self):
         pass
     
     def prepare_for_evaluation(self):
         pass
-    
+
+    def self_play_and_training_session(self, boards, start_epoch):
+        pass
+
     def train_step(self, epoch):
         pass
 
@@ -480,6 +835,7 @@ def evaluate_against_random(boards, random_agent, our_ai_agent):
     """
     Play an AI against random, to test whether a new training algorithm is working.
     """
+    boards.update_batch_size(256)
     batched_board = boards.to_tensor().cuda()
     dud_move_count = boards.get_starting_move_count_list()
     colour_list = torch.ones((batched_board.shape[0])).to(torch.bool).cuda()
@@ -508,60 +864,43 @@ def evaluate_against_random(boards, random_agent, our_ai_agent):
     print(f"Win count: {win_count} ({win_count / games_played * 100}%), "
           f"Lose count: {lose_count} ({lose_count / games_played * 100}%), "
           f"Draw count: {draw_count} ({draw_count / games_played * 100}%), ")
-    
 
-def ai_training_loop(boards, our_ai_agent, start_epoch):
-    """
-    Play an AI against itself. Generally for training.
-    """
-    batched_board = boards.to_tensor().cuda()
-    dud_move_count = boards.get_starting_move_count_list()
-    colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
-    total_games = 0
-    
-    #now = time.time()
-    end_epoch = start_epoch + 100
-    for move_num in range(start_epoch, end_epoch):
-        current_state = batched_board.clone()
-        (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
-            our_ai_agent.decide_and_enact_move((batched_board, colour_list, dud_move_count))
-        rewards = our_ai_agent.apply_all_rewards(game_over_tensor, (batched_board, opponent_move_layer))
-        game_over = torch.any(game_over_tensor, dim=1)
-        # Store state, action, rewards, terminals and next state to the buffer.
-        our_ai_agent.store_training_artifacts((current_state, move, promotion, rewards, game_over), opponent_move_layer)
-        if move_num >= 100:
-            our_ai_agent.train_step(move_num)
-        games_done = torch.sum(game_over.to(torch.int8))
-        total_games += games_done
-        #print(move_num)
-    #elapsed = time.time() - now
-    #print(elapsed)
-    return end_epoch
-    
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Parameters for training a chess engine.')
+    parser.add_argument(
+        'algorithm',
+        type=str,
+        default="DQN",
+        choices=["DQN", "A2C"],
+        help='The algorithm to use for training.'
+    )
+    args = parser.parse_args()
+    return args
+
 
 if __name__ == '__main__':
     # Starting condition
-    torch._dynamo.config.cache_size_limit = 256
+    args = get_args()
+    torch._dynamo.config.cache_size_limit = 64
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, 0)
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
     stockfish_agent = StockfishMoveAgent(boards, starting_position)
-    our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+    if args.algorithm == "DQN":
+        our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+    elif args.algorithm == "A2C":
+        our_ai_agent = A2CMoveAgent(boards, starting_position, {})
     #our_ai_agent.load_all_models()
     random_agent = RandomMoveAgent(boards, starting_position)
     our_ai_agent.prepare_for_training()
     start_epoch = 0
-    start_epoch = ai_training_loop(boards, our_ai_agent, start_epoch)
-    for i in range(0, 20):
-        if i == 1:
-            now = time.time()
+    #start_epoch = our_ai_agent.self_play_and_training_session(boards, start_epoch)
+    for i in range(0, 10):
         our_ai_agent.prepare_for_training()
-        start_epoch = ai_training_loop(boards, our_ai_agent, start_epoch)
-        print(our_ai_agent.q_network.eps, start_epoch)
-        our_ai_agent.prepare_for_evaluation()
-        evaluate_against_random(boards, random_agent, our_ai_agent)
-        if i == 1:
-            print(time.time() - now)
+        start_epoch = our_ai_agent.self_play_and_training_session(boards, start_epoch)
+        #our_ai_agent.prepare_for_evaluation()
+        #evaluate_against_random(boards, random_agent, our_ai_agent)
     our_ai_agent.prepare_for_evaluation()
     evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent)
     our_ai_agent.save_all_models()

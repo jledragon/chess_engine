@@ -11,11 +11,14 @@ import torch.nn.functional as F
 from mobile_cvt.MV2Block import MV2Block
 from mobile_cvt.MobileCvTBlock import MobileCvTBlock
 from mobile_cvt.MobileCvT import MobileCvT
-from chess_py_utils import get_random_move, get_human_readable_board, compile_if_supported
+from mobile_cvt.ConvUser import ConvUser
+from chess_py_utils import get_random_move, get_human_readable_board, compile_if_supported, expand_all_moves
 from blitz.modules import BayesianLinear, BayesianConv2d
 from itertools import chain
 import chess_cpp
 import os
+from einops.layers.torch import Reduce
+from my_optim import SharedAdamW
 
 
 class ResnetBlockFC(nn.Module):
@@ -102,117 +105,123 @@ class ResnetBlockFC2D(nn.Module):
         return self.actvn(x_s + dx)
 
 
-class FullChessNetwork(nn.Module):
-    def __init__(self):
-        super(FullChessNetwork, self).__init__()
-        self.mobile_vit = MobileCvT(
-            image_size=(8, 8),
-            dims=[96, 120, 144],
-            #channels=[16, 32, 64, 64, 128, 128, 256, 256, 512, 512, 1024, 1024, 1024],
-            channels=[32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32],
-            num_classes=128,  # Encoded board dimension
-            dataset_dim=6
-        )
-        self.fc1 = ResnetBlockFC(128)
-        self.fc2 = ResnetBlockFC(128)
-        self.fc3 = ResnetBlockFC(size_in=128, size_out=4096)
-        self.fc4 = ResnetBlockFC(size_in = 4096, size_h=1024, size_out=256)
-        self.fc5 = ResnetBlockFC(size_in = 256, size_h=64, size_out=4)
-    
-    def set_train_mode(self):
-        self.train()
-
-    def set_test_mode(self):
-        self.eval()
-    
-    def get_parameters(self):
-        return self.parameters()
-    
-    def forward(self, board):
-        promo = torch.tensor([[0, 0, 0, 1]]).repeat(256, 1).to(torch.float32).cuda()
-        enc = self.mobile_vit(board.to(torch.float32))
-        split = self.fc1(enc)
-        out = self.fc2(split)
-        out = self.fc3(out)
-        #promo = self.fc4(split)
-        #promo = self.fc5(promo)
-        return out, promo
-
-
 class Simple2DNetwork(nn.Module):
+    """
+    CNN with resnets. Performs reasonably well.
+    """
     
-    def __init__(self):
+    def __init__(self, value_part):
         # The 4 conv resnet blocks setup was the best performer of this bunch for the full game.
         super(Simple2DNetwork, self).__init__()
         self.conv_1 = nn.Conv2d(6, 256, (3, 3), padding=1) # 8
-        #self.conv_2 = nn.Conv2d(256, 512, 3, padding=0) # 6
-        #self.conv_3 = nn.Conv2d(512, 1024, 3, padding=0) # 4
-        #self.conv_4 = nn.Conv2d(1024, 2048, 3, padding=0) # 2
-        #self.conv_5 = nn.Conv2d(256, 1024, 5, padding=0)
-        #self.conv_6 = nn.Conv2d(512, 2048, 5, padding=0)
-        #self.conv_7 = nn.Conv2d(256, 2048, 7, padding=0)
-        self.conv_8 = nn.Conv2d(256, 128, (1, 1), padding=0)
-        #self.conv_5 = nn.Conv2d(2048, 4096, 2, padding=0)
+        self.conv_2 = nn.Conv2d(256, 128, (1, 1), padding=0)
         self.bn_1 = nn.BatchNorm2d(256)
         self.bn_2 = nn.BatchNorm2d(128)
-        self.conv_block_1 = ResnetBlockFC2D(256, 256)  # TODO - split the Bayesian version into its own class.
-        self.conv_block_2 = ResnetBlockFC2D(256, 256)
-        self.conv_block_3 = ResnetBlockFC2D(256, 256)
-        self.conv_block_4 = ResnetBlockFC2D(256, 256)
-        #self.m_block_1 = MV2Block(256, 256, 1, 4)
-        #self.m_block_2 = MV2Block(256, 256, 1, 4)
-        #self.m_block_3 = MV2Block(256, 256, 1, 4)
-        #self.t_block_1 = MobileCvTBlock(96, 2, 256, 3, (2, 2))
-        #self.t_block_2 = MobileCvTBlock(120, 4, 256, 3, (2, 2))
-        #self.t_block_3 = MobileCvTBlock(144, 3, 256, 3, (2, 2))
-        #self.res_block_1 = ResnetBlockFC(4096, 4096)
-        #self.res_block_2 = ResnetBlockFC(4096, 4096)
+        n_blocks = 4
+        self.conv_blocks = []
+        self.value_part = value_part
+        for _ in range(n_blocks):
+            self.conv_blocks.append(ResnetBlockFC2D(256, 256).cuda())  # TODO - split the Bayesian version into its own class.
         self.y_layer = nn.Linear(8192, 4096)
         nn.init.xavier_uniform_(self.conv_1.weight)
-        #nn.init.xavier_uniform_(self.conv_2.weight)
-        #nn.init.xavier_uniform_(self.conv_3.weight)
-        #nn.init.xavier_uniform_(self.conv_4.weight)
-        #nn.init.xavier_uniform_(self.conv_5.weight)
-        #nn.init.xavier_uniform_(self.conv_6.weight)
-        #nn.init.xavier_uniform_(self.conv_7.weight)
-        nn.init.xavier_uniform_(self.conv_8.weight)
+        nn.init.xavier_uniform_(self.conv_2.weight)
         nn.init.xavier_uniform_(self.y_layer.weight)
-        #self.test = nn.Linear(4096, 4096)
-        #self.test.weight = torch.nn.Parameter(torch.ones((4096, 4096)))
-        #self.test.bias = torch.nn.Parameter(torch.zeros((4096)))
-        #self.test.eval()
+        if value_part:
+            self.hidden_v_layer = nn.Conv2d(256, 1, (1, 1), padding=0)
+            self.v1_layer = nn.Linear(64, 16)
+            self.v2_layer = nn.Linear(16, 1)
+            self.bn_3 = nn.BatchNorm2d(1)
+            nn.init.xavier_uniform_(self.hidden_v_layer.weight)
+            nn.init.xavier_uniform_(self.v1_layer.weight)
+            nn.init.xavier_uniform_(self.v2_layer.weight)
+        self.lr = 1e-4
     
     def set_train_mode(self):
         self.train()
-        #self.test.eval()
 
     def set_test_mode(self):
         self.eval()
-    
+
     def get_parameters(self):
         return self.parameters()
-    
+
     def forward(self, board):
-        promo = torch.tensor([[0, 0, 0, 1]]).repeat(256, 1).to(torch.float32).cuda()
+        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
         xh1 = F.relu(self.bn_1(self.conv_1(board.to(torch.float32))))
-        #xh2 = self.t_block_1(self.m_block_1(xh1))
-        #xh3 = self.t_block_2(self.m_block_2(xh2))
-        #xh4 = self.t_block_3(self.m_block_3(xh3))
-        
-        #xh2 = F.relu(self.conv_2(xh1))
-        #xh3 = F.relu(self.conv_3(xh2)) # + self.conv_5(xh1))
-        #xh4 = F.relu(self.conv_4(xh3)) # + self.conv_6(xh2)) # + self.conv_7(xh1))
-        
-        xh2 = self.conv_block_1(xh1)
-        xh3 = self.conv_block_2(xh2)
-        xh4 = self.conv_block_3(xh3)
-        xh5 = self.conv_block_4(xh4)
-        xh6 = F.relu(self.bn_2(self.conv_8(xh5)))
-        xh7 = xh6.reshape(xh6.shape[0], 8192)
-        out = self.y_layer(xh7)
-        #out = self.test(out)
-        return out, promo
+        for block in self.conv_blocks:
+            xh1 = block(xh1)
+        xh2 = F.relu(self.bn_2(self.conv_2(xh1)))
+        xh3 = xh2.reshape(xh2.shape[0], 8192)
+        out = self.y_layer(xh3)
+        if not self.value_part:
+            return out, promo
+        else:
+            hv = F.relu(self.bn_3(self.hidden_v_layer(xh1)))
+            hv_1 = hv.reshape(hv.shape[0], 64)
+            v1 = F.relu(self.v1_layer(hv_1))
+            v = torch.tanh(self.v2_layer(v1))
+            return out, promo, v
+
+
+class CvTNetwork(ConvUser):
+    """
+    Use MobileCVT without compression.
+    """
     
+    def __init__(self, value_part):
+        super(CvTNetwork, self).__init__()
+        self.conv_1 = self.conv_nxn_bn(6, 64, kernel_size=3, stride=1)
+        patch_size=(2, 2)
+        expansion = 4
+        dropout = 0.1
+        self.lr = 1e-6
+
+        self.trunk = nn.ModuleList([])
+        self.trunk.append(nn.ModuleList([
+            MV2Block(64, 80, 1, expansion),
+            MobileCvTBlock(
+                96, 2, 80,
+                kernel_size=3, patch_size=patch_size, dropout=dropout)
+        ]))
+
+        self.trunk.append(nn.ModuleList([
+            MV2Block(80, 96, 1, expansion),
+            MobileCvTBlock(
+                120, 4, 96,
+                kernel_size=3, patch_size=patch_size, dropout=dropout)
+        ]))
+
+        self.trunk.append(nn.ModuleList([
+            MV2Block(96, 112, 1, expansion),
+            MobileCvTBlock(
+                144, 3, 112,
+                kernel_size=3, patch_size=patch_size, dropout=dropout)
+        ]))
+
+        self.to_logits = nn.Sequential(
+            self.conv_1x1_bn(112, 4096),
+            Reduce('b c h w -> b c', 'mean'),
+            nn.Linear(4096, 4096, bias=False)
+        )
+
+    def set_train_mode(self):
+        self.train()
+
+    def set_test_mode(self):
+        self.eval()
+
+    def get_parameters(self):
+        return self.parameters()
+
+    def forward(self, board):
+        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
+        x = self.conv_1(board.to(torch.float32))
+
+        for conv, attn in self.trunk:
+            x = conv(x)
+            x = attn(x)
+
+        return self.to_logits(x), promo
 
 
 class SimpleLinearNetwork(nn.Module):
@@ -220,14 +229,10 @@ class SimpleLinearNetwork(nn.Module):
     For debugging.
     """
 
-    def __init__(self):
+    def __init__(self, value_part):
         super(SimpleLinearNetwork, self).__init__()
         self.x_layer = nn.Linear(384, 4096)
         self.h_layer = nn.Linear(4096, 4096)
-        #self.h1_layer = ResnetBlockFC(4096, 4096)
-        #self.h2_layer = ResnetBlockFC(4096, 4096)
-        #self.h3_layer = ResnetBlockFC(4096, 4096)
-        #self.h4_layer = ResnetBlockFC(4096, 4096)
         self.y_layer = nn.Linear(4096, 4096)
         nn.init.xavier_uniform_(self.x_layer.weight)
         nn.init.xavier_uniform_(self.h_layer.weight)
@@ -237,6 +242,7 @@ class SimpleLinearNetwork(nn.Module):
         self.capstone.weight = torch.nn.Parameter(torch.ones((4096, 4096)))
         self.capstone.bias = torch.nn.Parameter(torch.zeros((4096)))
         self.capstone.eval()
+        self.lr = 1e-4
     
     def set_train_mode(self):
         self.train()
@@ -250,10 +256,9 @@ class SimpleLinearNetwork(nn.Module):
     
     def forward(self, board):
         board = board.reshape(board.shape[0], 384)
-        promo = torch.tensor([[0, 0, 0, 1]]).repeat(256, 1).to(torch.float32).cuda()
+        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
         xh = F.relu(self.x_layer(board.to(torch.float32)))
         hh = self.h_layer(xh)
-        #hh = self.h1_layer(hh)
         out = self.y_layer(hh)
         out = self.capstone(out)
         return out, promo
@@ -263,22 +268,18 @@ class DQNChessNetwork:
     def __init__(self):
         self.eps = 0.9
         self.prev_eps = self.eps
-        self.chess_network = Simple2DNetwork().cuda()
-        self.qnet_network = Simple2DNetwork().cuda()
+        self.chess_network = Simple2DNetwork(False).cuda()
+        self.qnet_network = Simple2DNetwork(False).cuda()
         try:
             self.chess_network = torch.compile(self.chess_network)
             self.qnet_network = torch.compile(self.qnet_network)
         except RuntimeError:
             print("Warning - compile not supported.")
-        #self.chess_network = SimpleLinearNetwork().cuda()
-        #self.qnet_network = SimpleLinearNetwork().cuda()
-        #self.chess_network = FullChessNetwork().cuda()
-        #self.qnet_network = FullChessNetwork().cuda()
         self.qnet_network.set_test_mode()
         self.softmax = nn.Softmax(dim=1)
         self.tau = 0.999
         self.discount_factor = 0.99
-        self.lr = 1e-4
+        self.lr = self.chess_network.lr
         self.optimiser = torch.optim.AdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
         self.huberLoss_function = nn.SmoothL1Loss()
         #self.MSELoss_function = nn.MSELoss()
@@ -341,6 +342,7 @@ class DQNChessNetwork:
         self.optimiser.zero_grad()
         q_network_loss.backward()
         torch.nn.utils.clip_grad_value_(self.chess_network.parameters(), 100)
+        # torch.nn.utils.clip_grad_norm_(self.chess_network.parameters(), 0.1)  # Alternative.
         self.optimiser.step()
         
     
@@ -375,4 +377,184 @@ class DQNChessNetwork:
             if purpose == 'train':
                 self.chess_network.train()
             elif purpose == 'eval':
+                self.chess_network.eval()
+
+
+class A2CChessNetwork:
+    def __init__(self):
+        self.global_network = Simple2DNetwork(True).cuda()
+        self.chess_network = Simple2DNetwork(True).cuda()
+        try:
+            self.global_network = torch.compile(self.global_network)
+            self.chess_network = torch.compile(self.chess_network)
+        except RuntimeError:
+            print("Warning - compile not supported.")
+        self.global_network.eval()
+        self.lr = self.chess_network.lr  # All use the same class, so all lr should be the same.
+        self.optimiser = SharedAdamW(self.global_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
+        self.optimiser.share_memory()
+        self.softmax = nn.Softmax(dim=1)
+        self.log_softmax = nn.LogSoftmax(dim=1)
+        self.train_mode = True
+        self.gamma = 0.99
+        self.gae_lambda = 1.0
+        self.entropy_coef = 0.01
+        self.value_loss_coef = 2.0
+
+    @compile_if_supported
+    def get_move_logits(self, out_move, move_layer):
+        filtered_out = torch.where(
+            move_layer,
+            out_move,
+            -float('inf'),
+        )
+        return filtered_out
+    
+    @compile_if_supported
+    def get_model_move_and_state(self, board):
+        out_move, _, state_value = self.chess_network.forward(board)
+        return out_move, state_value
+    
+    @compile_if_supported
+    def get_mcts_moves(self, out_move, state_value, move_layer):
+        assert move_layer.shape[0] == 1, "Must play with using single scenario in simulation mode."
+        ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
+        move_logits = self.get_move_logits(out_move, ml_mask)
+        move_probs = self.softmax(move_logits)
+        valid_move_indices = torch.argwhere(move_probs)[:,1:]
+        valid_probs = move_probs[ml_mask]
+        ft1 = valid_move_indices // 64
+        ft2 = valid_move_indices % 64
+        f1 = ft1 // 8
+        t1 = ft1 % 8
+        f2 = ft2 // 8
+        t2 = ft2 % 8
+        nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
+        return nn_move, valid_probs, state_value  # Future - deal with promotions too.
+    
+    @compile_if_supported
+    def get_best_opponent_move(self, board, move_layer):
+        # Opponent move for MCTS. Assume promotions to Queens
+        out_move, _, _ = self.chess_network.forward(board)
+        ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
+        move_logits = self.get_move_logits(out_move, ml_mask)
+        move_probs = self.softmax(move_logits)
+        action = torch.argmax(move_probs, dim=1, keepdim=True)
+        ft1 = action // 64
+        ft2 = action % 64
+        f1 = ft1 // 8
+        t1 = ft1 % 8
+        f2 = ft2 // 8
+        t2 = ft2 % 8
+        nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
+        return nn_move
+
+    def get_move(self, board, move_layer):  # Delete this?
+        out_move, out_prom, value = self.chess_network.forward(board)
+        ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
+        move_logits = self.get_move_logits(out_move, ml_mask)
+        move_probs = self.softmax(move_logits)
+        move_log_probs = self.log_softmax(move_logits)  # Apparently, doing log(softmax(x)) is numerically unstable.
+        if self.train_mode:
+            action = move_probs.multinomial(num_samples=1)
+        else:
+            action = torch.argmax(move_probs, dim=1, keepdim=True)
+        sm_prom = self.softmax(out_prom)
+        max_out_prom = torch.argmax(sm_prom, dim=1)
+        nn_prom = F.one_hot(max_out_prom, num_classes=4).to(torch.int8)
+        ft1 = action // 64
+        ft2 = action % 64
+        f1 = ft1 // 8
+        t1 = ft1 % 8
+        f2 = ft2 // 8
+        t2 = ft2 % 8
+        # A bunch of stuff that can probably go from here below.
+        nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
+        entropy = -(move_log_probs[ml_mask] * move_probs[ml_mask]).unsqueeze(0).sum(1, keepdim=True)
+        log_prob = move_log_probs.gather(1, action)
+        # A2C extras also returned here for computing the loss function
+        return nn_move, nn_prom, value, entropy, log_prob
+
+    def resync_models(self):
+        self.chess_network.load_state_dict(self.global_network.state_dict())
+
+    def update_network(self, white_values, black_values, white_rewards, black_rewards, game_over):
+        if game_over:
+            R_w = torch.zeros(1)
+            #R_b = torch.zeros(1)
+        else:
+            state_w, _, _, _ = white_values[-1]
+            _, _, R_w = self.chess_network.forward(state_w.cuda())
+            R_w = R_w.cpu()[0]
+            #state_b, _, _, _ = black_values[-1]
+            #_, _, R_b = self.chess_network.forward(state_b.cuda())
+            #R_b = R_b.cpu()[0]
+        white_values.append((None, R_w, None, None))
+        #black_values.append((None, R_b, None, None))
+        policy_loss_w = 0
+        value_loss_w = 0
+        gae_w = 0
+        #policy_loss_b = 0
+        #value_loss_b = 0
+        #gae_b = 0
+
+        for step in reversed(range(len(white_rewards))):
+            _, value, entropy, log_prob = white_values[step]
+            R_w = self.gamma * R_w + white_rewards[step]
+            advantage = R_w - value
+            value_loss_w = value_loss_w + 0.5 * advantage.pow(2)
+
+            # Generalized Advantage Estimation
+            next_value = white_values[step + 1][1]
+            delta_t = white_rewards[step] + self.gamma * next_value - value
+            gae_w = gae_w * self.gamma * self.gae_lambda + delta_t
+            policy_loss_w = policy_loss_w - log_prob * gae_w.detach() - self.entropy_coef * entropy
+
+        """for step in reversed(range(len(black_rewards))):
+            _, value, entropy, log_prob = black_values[step]
+            R_b = self.gamma * R_b + black_rewards[step]
+            advantage = R_b - value
+            value_loss_b = value_loss_b + 0.5 * advantage.pow(2)
+
+            # Generalized Advantage Estimation
+            next_value = black_values[step + 1][1]
+            delta_t = black_rewards[step] + self.gamma * next_value - value
+            gae_b = gae_b * self.gamma * self.gae_lambda + delta_t
+            policy_loss_b = policy_loss_b - log_prob * gae_b.detach() - self.entropy_coef * entropy"""
+
+        self.optimiser.zero_grad()
+        #(policy_loss_w + self.value_loss_coef * value_loss_w + policy_loss_b + self.value_loss_coef * value_loss_b).cuda().backward()
+        ((policy_loss_w + self.value_loss_coef * value_loss_w) * 0.1).cuda().backward()
+        torch.nn.utils.clip_grad_norm_(self.chess_network.parameters(), 50)
+        
+        for param, shared_param in zip(self.chess_network.parameters(), self.global_network.parameters()):
+            shared_param._grad = param.grad
+        self.optimiser.step()
+
+    def set_train_mode(self):
+        self.chess_network.set_train_mode()
+        self.train_mode = True
+    
+    def set_test_mode(self):
+        self.chess_network.set_test_mode()
+        self.train_mode = False
+    
+    def save_models(self):
+        torch.save({
+            "model_state": self.global_network.state_dict(),
+            "optimiser_state": self.optimiser.state_dict(),
+        }, 'models/last_model')
+    
+    def load_models(self, purpose):
+        if not os.path.exists('models/last_model'):
+            print("Warning - saved model files not found.")
+        else:
+            last_model = torch.load('models/last_model')
+            self.global_network.load_state_dict(last_model["model_state"])
+            self.optimiser.load_state_dict(last_model["optimiser_state"])
+            if purpose == 'train':
+                self.global_network.eval()
+                self.chess_network.train()
+            elif purpose == 'eval':
+                self.global_network.eval()
                 self.chess_network.eval()

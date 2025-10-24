@@ -1,5 +1,8 @@
+# -*- coding: utf-8 -*-
 """
-Copyright Kaedim Limited 2021.
+Created on Sun Mar  10 22:40:32 2024
+
+@author: jledragon
 """
 
 from torch import nn, einsum
