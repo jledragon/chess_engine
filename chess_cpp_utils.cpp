@@ -19,6 +19,7 @@ void enactMoves(torch::Tensor board, torch::Tensor selectedMoves, torch::Tensor 
 void getWherePromotion(torch::Tensor all_boards, torch::Tensor move_per_board, torch::Tensor isPromotion, const int batch_size, const int boardSize, const int encodingSize);
 void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromotions, torch::Tensor promoteMask, const int batch_size);
 void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tensor promoteMask, const int batch_size, const int boardSize, const int encodingSize);
+void expandValidProbs(torch::Tensor valid_probs, torch::Tensor newValidProbs, torch::Tensor promoteMask, const int batch_size);
 
 // C++ interface
 
@@ -259,18 +260,23 @@ class BatchedBoard {
             torch::Tensor gameOver = torch::zeros(tensor_size, options);
 
             for (int bNum=0; bNum<this->batch_size; bNum++) {
+                // The compact_pos tensor is B x 8 x 8 lots of int8s from 0 - 127. Get a pointer of B int8s that each stretch for length 64.
                 int8_t* int8_pos_batch = compact_pos[bNum].contiguous().data_ptr<int8_t>();
+                // Convert the pointer to characters. Should be B x 64 letters.
                 char* char_pos_batch = reinterpret_cast<char*>(int8_pos_batch);
+                // Then make these 64 characters into a string, representing this position at this batch.
                 std::string moveStr(char_pos_batch, (num_rows + 2) * pos_encoding);
+                // Look up the string in the hash map to get the number of occurrences.
                 std::unordered_map<std::string, int> thisMap = this->threefoldRepetitions.at(bNum);
-                if (thisMap.find(moveStr) == thisMap.end()) {
+                if (thisMap.find(moveStr) == thisMap.end()) {  // absent
                     thisMap[moveStr] = 1;
                 }
-                else{
+                else{  // present
                     thisMap[moveStr] = thisMap[moveStr] + 1;
                 }
                 int numSeen = thisMap[moveStr];
                 if (numSeen >= 3) {
+                    // The game is over when we've seen the same position 3 times in a game.
                     gameOver[bNum] = true;
                 }
                 this->threefoldRepetitions[bNum] = thisMap;
@@ -388,8 +394,8 @@ torch::Tensor get_pawn_promote_move_mask(torch::Tensor all_boards, torch::Tensor
     return isPromotion;
 }
 
-torch::Tensor expand_promotions(torch::Tensor promotion_per_board, torch::Tensor promoteMask) {
-    // Make the promotion vector larger - increase it with the full range of promotions where promoteMask is True.
+torch::Tensor expand_promotions_or_valid_moves(torch::Tensor promotion_per_board, torch::Tensor promoteMask) {
+    // Make the promotion (or moves) vector larger - increase it with the full range of promotions where promoteMask is True.
     at::Tensor numPromotions = promoteMask.sum();
     const int numPromotions_i = numPromotions.item<int>();
     const int oldBatchSize = promotion_per_board.sizes()[0];
@@ -412,6 +418,19 @@ torch::Tensor expand_boards(torch::Tensor all_boards, torch::Tensor promoteMask)
     torch::Tensor newBoards = torch::zeros(tensor_size, options);
     expandBoards(all_boards, newBoards, promoteMask, oldBatchSize, num_rows, bits_per_piece);
     return newBoards;
+}
+
+torch::Tensor expand_valid_probs(torch::Tensor valid_probs, torch::Tensor promoteMask) {
+    // Make the valid probs vector larger - extend it an extra 3x where promoteMask is True and split the probability by 4 (until we do something smarter)
+    at::Tensor numPromotions = promoteMask.sum();
+    const int numPromotions_i = numPromotions.item<int>();
+    const int oldBatchSize = valid_probs.sizes()[0];
+    const int newBatchSize = oldBatchSize + numPromotions_i * 3;
+    std::vector<int64_t> tensor_size = {newBatchSize};
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    torch::Tensor newValidProbs = torch::zeros(tensor_size, options);
+    expandValidProbs(valid_probs, newValidProbs, promoteMask, oldBatchSize);
+    return newValidProbs;
 }
 
 void enact_moves(torch::Tensor board, torch::Tensor selected_moves, torch::Tensor pawn_promotions, torch::Tensor move_count) {
@@ -452,8 +471,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("get_valid_blocking_squares_player", &get_valid_blocking_squares_player, "get_valid_blocking_squares_player");
     m.def("get_random_valid_move_per_game", &get_random_valid_move_per_game, "get_random_valid_move_per_game");
     m.def("get_pawn_promote_move_mask", &get_pawn_promote_move_mask, "get_pawn_promote_move_mask");
-    m.def("expand_promotions", &expand_promotions, "expand_promotions");
+    m.def("expand_promotions_or_valid_moves", &expand_promotions_or_valid_moves, "expand_promotions_or_valid_moves");
     m.def("expand_boards", &expand_boards, "expand_boards");
+    m.def("expand_valid_probs", &expand_valid_probs, "expand_valid_probs");
     m.def("enact_moves", &enact_moves, "enact_moves");
     m.def("is_stalemate", &is_stalemate, "is_stalemate");
     m.def("get_board_encoding", &get_board_encoding, "get_board_encoding");

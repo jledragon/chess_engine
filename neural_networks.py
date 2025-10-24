@@ -416,26 +416,22 @@ class A2CChessNetwork:
         return out_move, state_value
     
     @compile_if_supported
-    def get_mcts_moves(self, out_move, move_layer):
-        assert move_layer.shape[0] == 1, "Must play with using single scenario in simulation mode."
+    def get_mcts_moves(self, current_board, out_move, move_layer):
+        assert (move_layer.shape[0] == 1 and current_board.shape[0] == 1), "Must play with using single scenario in simulation mode."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
         move_logits = self.get_move_logits(out_move, ml_mask)
         move_probs = self.softmax(move_logits)
         valid_move_indices = torch.argwhere(move_probs)[:,1:]
         valid_probs = move_probs[ml_mask]
-        ft1 = valid_move_indices // 64
-        ft2 = valid_move_indices % 64
-        f1 = ft1 // 8
-        t1 = ft1 % 8
-        f2 = ft2 // 8
-        t2 = ft2 % 8
-        nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
-        return nn_move, valid_probs  # Future - deal with promotions too.
+        # TODO future - come up with a way to select the best promotion with the neural network somehow.
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(current_board[0], valid_move_indices, valid_probs)
+        return expanded_moves, expanded_promotions, expanded_valid_probs
     
     @compile_if_supported
     def get_best_opponent_move(self, board, move_layer):
         # Opponent move for MCTS. Assume promotions to Queens
-        out_move, _, _ = self.chess_network.forward(board)
+        out_move, out_prom, _ = self.chess_network.forward(board)
+        out_prom = out_prom.to(torch.int8)
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
         move_logits = self.get_move_logits(out_move, ml_mask)
         move_probs = self.softmax(move_logits)
@@ -447,7 +443,7 @@ class A2CChessNetwork:
         f2 = ft2 // 8
         t2 = ft2 % 8
         nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
-        return nn_move
+        return nn_move, out_prom
 
     def get_move(self, board, move_layer):  # Delete this?
         out_move, out_prom, value = self.chess_network.forward(board)
