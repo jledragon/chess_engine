@@ -240,8 +240,8 @@ def expand_all_moves(single_board, legal_moves, valid_probs):
     is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards, all_possible_moves)
     default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(all_possible_moves.shape[0], 1).to(torch.int8).cuda()
     expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
-    expanded_promotions = chess_cpp.expand_promotions_or_valid_moves(default_promotion, is_promotion)
-    expanded_moves = chess_cpp.expand_promotions_or_valid_moves(all_possible_moves, is_promotion)
+    expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
+    expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
     expanded_valid_probs = chess_cpp.expand_valid_probs(valid_probs, is_promotion)
     return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs
 

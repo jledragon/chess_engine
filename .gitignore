@@ -1,0 +1,6 @@
+__pycache__/
+build/
+chess_cpp.cp311-win_amd64.pyd
+dist/
+mobile_cvt/__pycache__/
+chess_cpp.egg-info/

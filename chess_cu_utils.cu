@@ -1044,6 +1044,32 @@ template<typename scalar_t> __global__ void expandPromotions_cu(scalar_t* __rest
     }
 }
 
+template<typename scalar_t> __global__ void expandMoves_cu(scalar_t* __restrict__ moves_per_board, scalar_t* __restrict__ newMoves, bool* __restrict__ promoteMask) {
+    int thisBatch = blockIdx.x;
+    int thisArea = thisBatch * 4;
+    int newIndex = 0;
+    for (int i=0; i<thisBatch; i++) {
+        newIndex += 1;
+        if (promoteMask[i] == 1) {
+            newIndex += 3;
+        }
+    }
+    int newArea = newIndex * 4;
+    if (promoteMask[thisBatch] == 1) {
+        for (int i=0; i<4; i++) {
+            newMoves[newArea + i] = moves_per_board[thisArea + i];
+            newMoves[newArea + 4 + i] = moves_per_board[thisArea + i];
+            newMoves[newArea + 8 + i] = moves_per_board[thisArea + i];
+            newMoves[newArea + 12 + i] = moves_per_board[thisArea + i];
+        }
+    }
+    else {
+        for (int i=0; i<4; i++) {
+            newMoves[newArea + i] = moves_per_board[thisArea + i];
+        }
+    }
+}
+
 template<typename scalar_t> __global__ void expandBoards_cu(scalar_t* __restrict__ all_boards, scalar_t* __restrict__ newBoards, bool* __restrict__ promoteMask, const int boardSize, const int encodingSize) {
     int thisBatch = blockIdx.x;
     int thisArea = thisBatch * encodingSize * boardSize * boardSize;
@@ -1271,6 +1297,20 @@ void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromot
         expandPromotions_cu<scalar_t><<<numberOfBlocks, 1>>>(
             promotion_per_board.data<scalar_t>(),
             newPromotions.data<scalar_t>(),
+            promoteMask.data<bool>()
+		);
+    }));
+
+	cudaDeviceSynchronize();
+}
+
+void expandMoves(torch::Tensor moves_per_board, torch::Tensor newMoves, torch::Tensor promoteMask, const int batch_size) {
+    size_t numberOfBlocks = batch_size;
+
+    AT_DISPATCH_INTEGRAL_TYPES(moves_per_board.type(), "expandMoves_cu", ([&] {
+        expandMoves_cu<scalar_t><<<numberOfBlocks, 1>>>(
+            moves_per_board.data<scalar_t>(),
+            newMoves.data<scalar_t>(),
             promoteMask.data<bool>()
 		);
     }));

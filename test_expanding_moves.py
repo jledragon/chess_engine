@@ -77,7 +77,7 @@ class TestExpandingMoves(unittest.TestCase):
             [0, 0, 0, 1],
             [0, 0, 0, 1],
         ]).to(torch.int8).cuda()
-        new_promotions = chess_cpp.expand_promotions_or_valid_moves(promotions, promotion_mask)
+        new_promotions = chess_cpp.expand_promotions(promotions, promotion_mask)
         assert torch.equal(new_promotions, torch.Tensor([
             [0, 0, 0, 1],
             [1, 0, 0, 0],

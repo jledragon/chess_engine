@@ -18,6 +18,7 @@ void selectRandomMoves(torch::Tensor flatMoves, torch::Tensor randomMove, torch:
 void enactMoves(torch::Tensor board, torch::Tensor selectedMoves, torch::Tensor pawnPromotions, torch::Tensor moveCount, const int batch_size, const int boardSize, const int encodingSize);
 void getWherePromotion(torch::Tensor all_boards, torch::Tensor move_per_board, torch::Tensor isPromotion, const int batch_size, const int boardSize, const int encodingSize);
 void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromotions, torch::Tensor promoteMask, const int batch_size);
+void expandMoves(torch::Tensor moves_per_board, torch::Tensor newMoves, torch::Tensor promoteMask, const int batch_size);
 void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tensor promoteMask, const int batch_size, const int boardSize, const int encodingSize);
 void expandValidProbs(torch::Tensor valid_probs, torch::Tensor newValidProbs, torch::Tensor promoteMask, const int batch_size);
 
@@ -394,8 +395,8 @@ torch::Tensor get_pawn_promote_move_mask(torch::Tensor all_boards, torch::Tensor
     return isPromotion;
 }
 
-torch::Tensor expand_promotions_or_valid_moves(torch::Tensor promotion_per_board, torch::Tensor promoteMask) {
-    // Make the promotion (or moves) vector larger - increase it with the full range of promotions where promoteMask is True.
+torch::Tensor expand_promotions(torch::Tensor promotion_per_board, torch::Tensor promoteMask) {
+    // Make the promotion vector larger - increase it with the full range of promotions where promoteMask is True.
     at::Tensor numPromotions = promoteMask.sum();
     const int numPromotions_i = numPromotions.item<int>();
     const int oldBatchSize = promotion_per_board.sizes()[0];
@@ -405,6 +406,19 @@ torch::Tensor expand_promotions_or_valid_moves(torch::Tensor promotion_per_board
     torch::Tensor newPromotions = torch::zeros(tensor_size, options);
     expandPromotions(promotion_per_board, newPromotions, promoteMask, oldBatchSize);
     return newPromotions;
+}
+
+torch::Tensor expand_moves(torch::Tensor moves_per_board, torch::Tensor promoteMask) {
+    // Make the moves vector larger - expand 4x for cases where promotemask is True.
+    at::Tensor numPromotions = promoteMask.sum();
+    const int numPromotions_i = numPromotions.item<int>();
+    const int oldBatchSize = moves_per_board.sizes()[0];
+    const int newBatchSize = oldBatchSize + numPromotions_i * 3;
+    std::vector<int64_t> tensor_size = {newBatchSize, 4};
+    auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCUDA);
+    torch::Tensor newMoves = torch::zeros(tensor_size, options);
+    expandMoves(moves_per_board, newMoves, promoteMask, oldBatchSize);
+    return newMoves;
 }
 
 torch::Tensor expand_boards(torch::Tensor all_boards, torch::Tensor promoteMask) {
@@ -471,7 +485,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("get_valid_blocking_squares_player", &get_valid_blocking_squares_player, "get_valid_blocking_squares_player");
     m.def("get_random_valid_move_per_game", &get_random_valid_move_per_game, "get_random_valid_move_per_game");
     m.def("get_pawn_promote_move_mask", &get_pawn_promote_move_mask, "get_pawn_promote_move_mask");
-    m.def("expand_promotions_or_valid_moves", &expand_promotions_or_valid_moves, "expand_promotions_or_valid_moves");
+    m.def("expand_promotions", &expand_promotions, "expand_promotions");
+    m.def("expand_moves", &expand_moves, "expand_moves");
     m.def("expand_boards", &expand_boards, "expand_boards");
     m.def("expand_valid_probs", &expand_valid_probs, "expand_valid_probs");
     m.def("enact_moves", &enact_moves, "enact_moves");
