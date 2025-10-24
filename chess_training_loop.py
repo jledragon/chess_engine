@@ -424,7 +424,7 @@ class MCTSNode:
     A single node in MCTS representing a state and its attributes for MCTS.
     """
     
-    def __init__(self, current_board, moves_for_state, terminal_status, dud_move_count):
+    def __init__(self, current_state, moves_for_state, terminal_status):
         self.N = 0  # Number of times an action has been taken from this state.
         self.W = 0  # Value of the next state.
         self.Q = 0  # Mean value of the next state.
@@ -435,14 +435,18 @@ class MCTSNode:
         # Required values for rollout below
         self.is_leaf = True
         self.rollout_done = False
+        current_board, dud_move_count = current_state
         self.current_board = current_board
         self.moves_for_state = moves_for_state
         self.terminal_status = terminal_status
         self.dud_move_count = dud_move_count
         self.model_move = None
+        self.pred_value = None
         self.state_value = None
         self.predicted_value = None
-        self.temperature = 1
+        self.opponent_move_to_get_here = None  # Will be from the opponent's point of view. Does not handle promotions currently.
+        self.temperature = 2
+        self.opponent_actual_move = None
     
     def update_actions_and_values(self, valid_actions, action_probs, state_value, predicted_value):
         self.P = action_probs
@@ -450,10 +454,11 @@ class MCTSNode:
         self.state_value = state_value
         self.predicted_value = predicted_value
     
-    def add_predictions(self, model_move, pred_value):
+    def add_predictions(self, model_move, pred_value, opponent_move_to_get_here):
         # Add the predictions that led us to this state. This saves us a lot of computation time by batching up model predictions.
         self.model_move = model_move
         self.pred_value = pred_value
+        self.opponent_move_to_get_here = opponent_move_to_get_here
     
     def set_non_leaf(self):
         self.is_leaf = False
@@ -461,6 +466,9 @@ class MCTSNode:
         self.moves_for_state = None
         self.model_move = None
         self.pred_value = None
+    
+    def set_opponent_actual_move(self, actual_move):
+        self.opponent_actual_move = actual_move
     
     def get_probability_distribution(self):
         child_ns = [child.N for child in self.children]
@@ -490,35 +498,35 @@ class MCTSGraph:
         self.top_node = None
     
     @compile_if_supported
-    def init_top_node_if_first_move(self, current_board, moves_for_state):
+    def init_top_node_if_empty_graph(self, current_board, moves_for_state):
         if self.top_node is None:
             not_terminal = torch.zeros((3)).to(torch.bool).cuda()  # No win, no loss, no draw
             dud_move_count = self.boards.get_starting_move_count_list()
-            self.top_node = MCTSNode(current_board, moves_for_state, not_terminal, dud_move_count[0])
+            self.top_node = MCTSNode((current_board, dud_move_count[0]), moves_for_state, not_terminal)
     
             # Special - only do this for the first move of the game.
             self.top_node.rollout_done = True
             if torch.sum(moves_for_state) > 0:
                 # Possible no grad here.
-                model_move, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
-                self.top_node.add_predictions(model_move, state_value)
-                valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(model_move, state_value, moves_for_state)
-                predicted_value = predicted_value.squeeze(0)
+                model_moves, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
+                self.top_node.add_predictions(None, state_value, None)  # No opponent move led us here.
+                valid_actions, action_probs = self.model.get_mcts_moves(model_moves, moves_for_state)
+                predicted_value = state_value.squeeze(0)
                 self.top_node.update_actions_and_values(valid_actions, action_probs, predicted_value, predicted_value)
     
     @compile_if_supported
     def rollout(self, node):
-        # "Rollout" compared to traditional MCTS means predict the value from the model, unless the ground truth terminal gives better information.
+        # "Rollout" compared to traditional MCTS means predicts the value from the model, unless the ground truth terminal gives better information.
         node.rollout_done = True
         # Possible no grad here.
         moves_for_state = node.moves_for_state
-        valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(node.model_move, node.pred_value, moves_for_state)
+        valid_actions, action_probs = self.model.get_mcts_moves(node.model_move, moves_for_state)
         
         # Deal with the current state's value.
         state_value = self.value_mask[node.terminal_status]
-        state_value = predicted_value if state_value.shape[0] == 0 else state_value
+        state_value = node.pred_value if state_value.shape[0] == 0 else state_value
         assert not state_value.shape[0] > 1, "Error - node end state had more than one outcome."
-        node.update_actions_and_values(valid_actions, action_probs, state_value, predicted_value)
+        node.update_actions_and_values(valid_actions, action_probs, state_value, node.pred_value)
 
     #@compile_if_supported  # Somehow slows things down?
     def generate_children(self, node):
@@ -538,13 +546,17 @@ class MCTSGraph:
             (_, _), (dud_move_count, board_tensor_half, colour_list, opponent_move_layer, game_over_tensor_1) = \
                 self.agent.enact_move((valid_actions, multi_prom), (multi_board, colour_list, dud_move_count))
             we_won = torch.unsqueeze(game_over_tensor_1[:, 0], 1)
+            we_drew_part = torch.any(game_over_tensor_1[:, 1:], axis=1)
             
             # Find and enact the best opponent move to complete the state transition.
             best_opponent_move = self.model.get_best_opponent_move(board_tensor_half[:,:6,:,:], opponent_move_layer)
             (_, _), (dud_move_count, next_board_tensor, colour_list, my_next_move_layer, game_over_tensor_2) = \
                 self.agent.enact_move((best_opponent_move, multi_prom), (board_tensor_half, colour_list, dud_move_count))
+            # If we have won or drawn, play out the opponent move anyway (which will be nonsense, but efficient compute-wise), but do not register a loss or draw.
+            game_over_tensor_2[we_won.repeat(1, game_over_tensor_2.shape[1])] = False
+            game_over_tensor_2[torch.unsqueeze(we_drew_part, 1).repeat(1, game_over_tensor_2.shape[1])] = False
             we_lost = torch.unsqueeze(game_over_tensor_2[:, 0], 1)
-            we_drew = torch.unsqueeze(torch.logical_or(torch.any(game_over_tensor_1[:, 1:], axis=1), torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
+            we_drew = torch.unsqueeze(torch.logical_or(we_drew_part, torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
             # Re-contract threefold repetitions in the board object.
             self.boards.set_singular_threefold_repetitions()
 
@@ -555,8 +567,8 @@ class MCTSGraph:
                 state = torch.unsqueeze(next_board_tensor[act_num], 0)
                 move = torch.unsqueeze(my_next_move_layer[act_num], 0)
                 term = terminals[act_num]
-                child_node = MCTSNode(state, move, term, dud_move_count[act_num])
-                child_node.add_predictions(torch.unsqueeze(pred_moves[act_num], 0), pred_values[act_num])
+                child_node = MCTSNode((state, dud_move_count[act_num]), move, term)
+                child_node.add_predictions(torch.unsqueeze(pred_moves[act_num], 0), pred_values[act_num], best_opponent_move[act_num])
                 node.children.append(child_node)
         node.set_non_leaf()
     
@@ -576,8 +588,12 @@ class MCTSGraph:
     def generate_graph(self):
         # Compilation time is 2 minutes or longer, so disable this if debugging.
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
+        start = time.time()
         with torch.no_grad():
-            for _ in range(0, self.depth):
+            for i in range(0, self.depth):
+                if i % 100 == 0:
+                    split = time.time()
+                    print(split - start)
                 current_state = self.top_node
                 # Find the next node to roll out and then do so.
                 backup_states = [current_state]
@@ -586,9 +602,13 @@ class MCTSGraph:
                     backup_states.append(current_state)
                 if not current_state.rollout_done:
                     self.rollout(current_state)
+                    print("Rollout true")
+                else:
+                    print("Rollout false")
                 game_over = torch.any(current_state.terminal_status)  # Most probably a win if so.
                 # If we have found a best "winning" state, keep on going to increase its N value.
                 if current_state.N >= 1 and not game_over:
+                    print("Generating children")
                     self.generate_children(current_state)
 
                 # Backpropagate
@@ -604,7 +624,6 @@ class MCTSGraph:
             temperature_values = [(n / self.top_node.N) ** self.top_node.temperature for n in child_n_values]
             sum_temp = sum(temperature_values)
             norm_temp = [t / sum_temp for t in temperature_values]
-            print(norm_temp, "normal_temp")
             choice = np.random.choice(len(norm_temp), 1, p=norm_temp)
         else:
             highest_n = max(child_n_values)
@@ -612,6 +631,14 @@ class MCTSGraph:
         action = self.top_node.valid_actions[choice]
         self.top_node = self.top_node.children[choice[0]]
         return action, self.always_queen  # Revisit actual promotions later.
+    
+    def update_true_last_opponent_move(self):
+        # Deal with white MCTS if opponent's move was not what we thought (maybe move this to its own method in MCTSGraph)
+        if self.top_node is not None:
+            predicted_opponent_move = self.top_node.opponent_move_to_get_here
+            actual_move = self.top_node.opponent_actual_move
+            if predicted_opponent_move is not None and not torch.equal(actual_move, predicted_opponent_move):
+                self.reset_graph()  # Chuck out all our computation and start over.
 
 
 class A2CMoveAgent(JLEAIMoveAgent):
@@ -661,29 +688,29 @@ class A2CMoveAgent(JLEAIMoveAgent):
         # Get the moves
         move_layer = chess_cpp.get_moves_for_player(board_tensor)
         # Choose a move
-        if self.training:
-            if self.whites_move:
-                self.white_mcts.init_top_node_if_first_move(board_tensor, move_layer)
-                start = time.time()
-                if torch.sum(move_layer) > 0:
-                    self.white_mcts.generate_graph()  # The new way.
-                    print(time.time() - start)
+        if self.whites_move:
+            self.white_mcts.update_true_last_opponent_move()  # Potentially resets the graph if opponent did something different to our assumption.
+            self.white_mcts.init_top_node_if_empty_graph(board_tensor, move_layer)
+            start = time.time()
+            if torch.sum(move_layer) > 0:
+                self.white_mcts.generate_graph()  # The new way.
+                print(time.time() - start)
+                if self.training:
                     self.running_white_p.append(self.white_mcts.top_node.P)
                     self.running_white_prob.append(self.white_mcts.top_node.get_probability_distribution())
-                    a2c_move, a2c_promotion = self.white_mcts.choose_move_and_update_graph(is_training=True)
-                self.boards.update_batch_size(1)  # To be safe.
-                # Next to do 21/12/2024:
-                # Use the "Choice" node as the new top node. Retain the graph from there.
-                # Update the MCTS code to use the current selected node, rather than always starting from the universal top node.
-                # Speed up generating graph more, perhaps?
-                # Also sort out how I handle dud move counts and draws by threefold repetition. (30/04/25 - this next).
-                # Deal with promotions.
-                # Decide how I compute the loss function after that.
-                # (25/1/25) - Fix the error. No idea as to the cause.
-            else:
-                #self.black_mcts.update_state(board_tensor)
-                a2c_move, a2c_promotion = get_random_move(board_tensor, move_layer)
-                #self.black_values_buffer.append((state.cpu(), game_value.cpu(), entropy.cpu(), log_prob.cpu()))
+                a2c_move, a2c_promotion = self.white_mcts.choose_move_and_update_graph(is_training=self.training)
+            self.boards.update_batch_size(1)  # To be safe.
+            # Next to do 06/05/2025:
+            # Speed up generating graph more, perhaps? - This next.
+            # Deal with promotions.
+            # Use MCTS for black as well.
+        else:
+            #self.black_mcts.update_state(board_tensor)
+            a2c_move, a2c_promotion = get_random_move(board_tensor, move_layer)
+
+            actual_move = torch.squeeze(a2c_move, 0)
+            self.white_mcts.top_node.set_opponent_actual_move(actual_move)
+            #self.black_values_buffer.append((state.cpu(), game_value.cpu(), entropy.cpu(), log_prob.cpu()))
         return (a2c_move, a2c_promotion)
 
     def _get_my_rewards(self, game_over_tensor, opponent_move_layer):
@@ -729,6 +756,12 @@ class A2CMoveAgent(JLEAIMoveAgent):
         #if epoch == 2100:
         #    for group in self.model.optimiser.param_groups:
         #        group['lr'] = group['lr'] * 0.1
+    
+    def log_stockfish_move(self, move, board_state, starting_colour_me):
+        jle_move, jle_promotion = convert_UCI_to_jle_notation(move, starting_colour_me)
+        actual_move = torch.squeeze(jle_move, 0)
+        self.white_mcts.top_node.set_opponent_actual_move(actual_move)
+        return super().log_stockfish_move(move, board_state, starting_colour_me)
 
     def self_play_and_training_session(self, boards, start_epoch):
         """
@@ -739,13 +772,14 @@ class A2CMoveAgent(JLEAIMoveAgent):
         dud_move_count = boards.get_starting_move_count_list()
         colour_list = torch.ones((1)).to(torch.bool).cuda()
         
-        end_epoch = start_epoch + 500
+        end_epoch = start_epoch + 200
         self.wins = 0
         self.losses = 0
         for move_num in range(start_epoch, end_epoch):
             game_over = False
             episode_length = 0
             self.start_episode()
+            i = 1
             while not game_over:
                 (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
                     self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
@@ -756,6 +790,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 if episode_length >= self.max_episode_length:
                     batched_board, colour_list, dud_move_count = self.reset_all((batched_board, colour_list, dud_move_count))
                     break
+                i = i + 1
+            print(f"Game length: {i} checkmate? {game_over_tensor[0, 0]}")
             episode_length = 0
             self.train_step(move_num)
             self.end_episode()
@@ -828,7 +864,7 @@ def evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent):
         colour_list = torch.ones((1)).to(torch.bool).cuda()
         single_board = boards.to_tensor().cuda()
         winner = ''
-        if random() > 0.5:
+        if random() > 0.0:  # 0.5
             # Play white.
             starting_colour = True
             (randomly_selected_move, random_promotion), (dud_move_count, single_board, colour_list, _, game_over_tensor) = \
@@ -934,7 +970,7 @@ if __name__ == '__main__':
     our_ai_agent.prepare_for_training()
     start_epoch = 0
     #start_epoch = our_ai_agent.self_play_and_training_session(boards, start_epoch)
-    for i in range(0, 10):
+    for i in range(0, 1):
         our_ai_agent.prepare_for_training()
         start_epoch = our_ai_agent.self_play_and_training_session(boards, start_epoch)
         #our_ai_agent.prepare_for_evaluation()

@@ -416,7 +416,7 @@ class A2CChessNetwork:
         return out_move, state_value
     
     @compile_if_supported
-    def get_mcts_moves(self, out_move, state_value, move_layer):
+    def get_mcts_moves(self, out_move, move_layer):
         assert move_layer.shape[0] == 1, "Must play with using single scenario in simulation mode."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
         move_logits = self.get_move_logits(out_move, ml_mask)
@@ -430,7 +430,7 @@ class A2CChessNetwork:
         f2 = ft2 // 8
         t2 = ft2 % 8
         nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
-        return nn_move, valid_probs, state_value  # Future - deal with promotions too.
+        return nn_move, valid_probs  # Future - deal with promotions too.
     
     @compile_if_supported
     def get_best_opponent_move(self, board, move_layer):
@@ -486,7 +486,7 @@ class A2CChessNetwork:
             cross_entropy_total = cross_entropy_total + F.cross_entropy(pred_p, true_p)
         cross_entropy_mean = cross_entropy_total / len(white_p)  # Would not be zero for ordinary games of chess
         reward_loss = F.mse_loss(predicted_end_reward, true_end_reward)
-        combined_loss = cross_entropy_mean * 0.3 + reward_loss
+        combined_loss = cross_entropy_mean * 0.3 + 3 * reward_loss
         self.optimiser.zero_grad()
         combined_loss.backward()
         self.optimiser.step()
