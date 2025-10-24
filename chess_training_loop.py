@@ -37,7 +37,7 @@ from chess_py_utils import (
 )
 from neural_networks import DQNChessNetwork, A2CChessNetwork
 
-BATCH_SIZE = 256
+BATCH_SIZE = 1
 
 class AIMoveAgent(ABC):
     """
@@ -424,7 +424,7 @@ class MCTSNode:
     A single node in MCTS representing a state and its attributes for MCTS.
     """
     
-    def __init__(self, current_board, moves_for_state, terminal_status):
+    def __init__(self, current_board, moves_for_state, terminal_status, dud_move_count):
         self.N = 0  # Number of times an action has been taken from this state.
         self.W = 0  # Value of the next state.
         self.Q = 0  # Mean value of the next state.
@@ -438,13 +438,17 @@ class MCTSNode:
         self.current_board = current_board
         self.moves_for_state = moves_for_state
         self.terminal_status = terminal_status
+        self.dud_move_count = dud_move_count
         self.model_move = None
         self.state_value = None
+        self.predicted_value = None
+        self.temperature = 1
     
-    def update_actions_and_values(self, valid_actions, action_probs, state_value):
+    def update_actions_and_values(self, valid_actions, action_probs, state_value, predicted_value):
         self.P = action_probs
         self.valid_actions = valid_actions
         self.state_value = state_value
+        self.predicted_value = predicted_value
     
     def add_predictions(self, model_move, pred_value):
         # Add the predictions that led us to this state. This saves us a lot of computation time by batching up model predictions.
@@ -457,6 +461,13 @@ class MCTSNode:
         self.moves_for_state = None
         self.model_move = None
         self.pred_value = None
+    
+    def get_probability_distribution(self):
+        child_ns = [child.N for child in self.children]
+        temperature_values = [(n / self.N) ** self.temperature for n in child_ns]
+        sum_temp = sum(temperature_values)
+        norm_temp = torch.Tensor([t / sum_temp for t in temperature_values]).to(self.P.device).to(self.P.dtype)
+        return norm_temp
 
 
 class MCTSGraph:
@@ -473,53 +484,57 @@ class MCTSGraph:
         self.model = agent.model
         self.always_queen = torch.tensor([[0, 0, 0, 1]]).to(torch.int8).cuda()
         self.boards = boards
-        self.value_mask = torch.tensor([1, 0, -1]).to(torch.int8).cuda()
-        self.temperature = 1
+        self.value_mask = torch.tensor([1, -1, 0]).to(torch.float32).cuda()
 
     def reset_graph(self):
         self.top_node = None
     
     @compile_if_supported
-    def init_top_node(self, current_board, moves_for_state):
-        not_terminal = torch.zeros((3)).to(torch.bool).cuda()  # No win, no loss, no draw
-        self.top_node = MCTSNode(current_board, moves_for_state, not_terminal)
-
-        # Special - only do this for the first move of the game.
-        self.top_node.rollout_done = True
-        with torch.no_grad():
-            model_move, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
-            self.top_node.add_predictions(model_move, state_value)
-            valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(model_move, state_value, moves_for_state)
-            predicted_value = predicted_value.squeeze(0)
-            self.top_node.update_actions_and_values(valid_actions, action_probs, predicted_value)
+    def init_top_node_if_first_move(self, current_board, moves_for_state):
+        if self.top_node is None:
+            not_terminal = torch.zeros((3)).to(torch.bool).cuda()  # No win, no loss, no draw
+            dud_move_count = self.boards.get_starting_move_count_list()
+            self.top_node = MCTSNode(current_board, moves_for_state, not_terminal, dud_move_count[0])
+    
+            # Special - only do this for the first move of the game.
+            self.top_node.rollout_done = True
+            if torch.sum(moves_for_state) > 0:
+                # Possible no grad here.
+                model_move, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
+                self.top_node.add_predictions(model_move, state_value)
+                valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(model_move, state_value, moves_for_state)
+                predicted_value = predicted_value.squeeze(0)
+                self.top_node.update_actions_and_values(valid_actions, action_probs, predicted_value, predicted_value)
     
     @compile_if_supported
     def rollout(self, node):
         # "Rollout" compared to traditional MCTS means predict the value from the model, unless the ground truth terminal gives better information.
         node.rollout_done = True
-        with torch.no_grad():
-            moves_for_state = node.moves_for_state
-            valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(node.model_move, node.pred_value, moves_for_state)
-            
-            # Deal with the current state's value.
-            state_value = self.value_mask[node.terminal_status]
-            state_value = predicted_value if state_value.shape[0] == 0 else state_value
-            assert not state_value.shape[0] > 1, "Error - node end state had more than one outcome."
-            node.update_actions_and_values(valid_actions, action_probs, state_value)
+        # Possible no grad here.
+        moves_for_state = node.moves_for_state
+        valid_actions, action_probs, predicted_value = self.model.get_mcts_moves(node.model_move, node.pred_value, moves_for_state)
+        
+        # Deal with the current state's value.
+        state_value = self.value_mask[node.terminal_status]
+        state_value = predicted_value if state_value.shape[0] == 0 else state_value
+        assert not state_value.shape[0] > 1, "Error - node end state had more than one outcome."
+        node.update_actions_and_values(valid_actions, action_probs, state_value, predicted_value)
 
-    @compile_if_supported
+    #@compile_if_supported  # Somehow slows things down?
     def generate_children(self, node):
         with torch.no_grad():
             current_board = node.current_board
             valid_actions = node.valid_actions
             num_actions = valid_actions.shape[0]
+            self.boards.update_batch_size(num_actions)
             multi_prom = self.always_queen.repeat(num_actions, 1)  # Current behaviour. Deal with promotions later.
 
             # Enact each action on copies of the board.
             multi_board = current_board.repeat(num_actions, 1, 1, 1)
             colour_list = torch.ones((num_actions)).to(torch.bool).cuda()  # We are always us, or "white" when considering expansion.
-            boards.update_batch_size(num_actions)
-            dud_move_count = boards.get_starting_move_count_list()
+            dud_move_count = torch.unsqueeze(node.dud_move_count, 0).repeat(num_actions, 1)
+            # Expand threefold repetitions in the board to match num_actions
+            self.boards.expand_threefold_repetitions(num_actions)
             (_, _), (dud_move_count, board_tensor_half, colour_list, opponent_move_layer, game_over_tensor_1) = \
                 self.agent.enact_move((valid_actions, multi_prom), (multi_board, colour_list, dud_move_count))
             we_won = torch.unsqueeze(game_over_tensor_1[:, 0], 1)
@@ -530,6 +545,8 @@ class MCTSGraph:
                 self.agent.enact_move((best_opponent_move, multi_prom), (board_tensor_half, colour_list, dud_move_count))
             we_lost = torch.unsqueeze(game_over_tensor_2[:, 0], 1)
             we_drew = torch.unsqueeze(torch.logical_or(torch.any(game_over_tensor_1[:, 1:], axis=1), torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
+            # Re-contract threefold repetitions in the board object.
+            self.boards.set_singular_threefold_repetitions()
 
             terminals = torch.cat((we_won, we_lost, we_drew), axis=1)
             pred_moves, pred_values = self.model.get_model_move_and_state(next_board_tensor[:,:6,:,:])
@@ -538,7 +555,7 @@ class MCTSGraph:
                 state = torch.unsqueeze(next_board_tensor[act_num], 0)
                 move = torch.unsqueeze(my_next_move_layer[act_num], 0)
                 term = terminals[act_num]
-                child_node = MCTSNode(state, move, term)
+                child_node = MCTSNode(state, move, term, dud_move_count[act_num])
                 child_node.add_predictions(torch.unsqueeze(pred_moves[act_num], 0), pred_values[act_num])
                 node.children.append(child_node)
         node.set_non_leaf()
@@ -569,7 +586,9 @@ class MCTSGraph:
                     backup_states.append(current_state)
                 if not current_state.rollout_done:
                     self.rollout(current_state)
-                if current_state.N >= 1:
+                game_over = torch.any(current_state.terminal_status)  # Most probably a win if so.
+                # If we have found a best "winning" state, keep on going to increase its N value.
+                if current_state.N >= 1 and not game_over:
                     self.generate_children(current_state)
 
                 # Backpropagate
@@ -579,17 +598,20 @@ class MCTSGraph:
                     back_state.W = back_state.W + value
                     back_state.Q = back_state.W / back_state.N
     
-    def choose_move(self, is_training):
+    def choose_move_and_update_graph(self, is_training):
         child_n_values = [child.N for child in self.top_node.children]
         if is_training:
-            temperature_values = [(n / self.top_node.N) ** self.temperature for n in child_n_values]
+            temperature_values = [(n / self.top_node.N) ** self.top_node.temperature for n in child_n_values]
             sum_temp = sum(temperature_values)
             norm_temp = [t / sum_temp for t in temperature_values]
+            print(norm_temp, "normal_temp")
             choice = np.random.choice(len(norm_temp), 1, p=norm_temp)
-            return self.top_node.valid_actions[choice]
         else:
             highest_n = max(child_n_values)
-            return self.top_node.valid_actions[child_n_values.index(highest_n)]
+            choice = [child_n_values.index(highest_n)]
+        action = self.top_node.valid_actions[choice]
+        self.top_node = self.top_node.children[choice[0]]
+        return action, self.always_queen  # Revisit actual promotions later.
 
 
 class A2CMoveAgent(JLEAIMoveAgent):
@@ -605,13 +627,15 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.white_rewards_buffer = []
         self.black_values_buffer = []
         self.black_rewards_buffer = []
+        self.running_white_p = []
+        self.running_white_prob = []
         self.model = A2CChessNetwork()
         self.training = True
         self.whites_move = True  # True is white, False is black. We can reason this way with a batch size of 1.
         self.win_reward = 100.0 / 100.0 # 100
         self.lose_reward = -100 / 100.0 # -100
         self.move_reward = -1 / 100.0
-        self.max_episode_length = 256
+        self.max_episode_length = 64
         self.wins = 0
         self.losses = 0
         self.white_mcts = MCTSGraph(self, boards)
@@ -623,6 +647,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.white_rewards_buffer.clear()
         self.black_values_buffer.clear()
         self.black_rewards_buffer.clear()
+        self.running_white_p.clear()
+        self.running_white_prob.clear()
         # torch.cuda.empty_cache()  # Dodgy - nvidia-smi is all over the place with this.
 
     def start_episode(self):
@@ -635,22 +661,27 @@ class A2CMoveAgent(JLEAIMoveAgent):
         # Get the moves
         move_layer = chess_cpp.get_moves_for_player(board_tensor)
         # Choose a move
-        print("Debug - Choose a move.")
         if self.training:
             if self.whites_move:
-                self.white_mcts.init_top_node(board_tensor, move_layer)
-                #a2c_move, a2c_promotion, game_value, entropy, log_prob = self.model.get_move(state, move_layer)  # The old way (07/07/2024)
-                self.white_mcts.generate_graph()  # The new way.
-                self.white_mcts.init_top_node(board_tensor, move_layer)
-                next_move = self.white_mcts.choose_move(is_training=True)
+                self.white_mcts.init_top_node_if_first_move(board_tensor, move_layer)
+                start = time.time()
+                if torch.sum(move_layer) > 0:
+                    self.white_mcts.generate_graph()  # The new way.
+                    print(time.time() - start)
+                    self.running_white_p.append(self.white_mcts.top_node.P)
+                    self.running_white_prob.append(self.white_mcts.top_node.get_probability_distribution())
+                    a2c_move, a2c_promotion = self.white_mcts.choose_move_and_update_graph(is_training=True)
+                self.boards.update_batch_size(1)  # To be safe.
                 # Next to do 21/12/2024:
                 # Use the "Choice" node as the new top node. Retain the graph from there.
                 # Update the MCTS code to use the current selected node, rather than always starting from the universal top node.
                 # Speed up generating graph more, perhaps?
+                # Also sort out how I handle dud move counts and draws by threefold repetition. (30/04/25 - this next).
+                # Deal with promotions.
                 # Decide how I compute the loss function after that.
-                assert False
+                # (25/1/25) - Fix the error. No idea as to the cause.
             else:
-                self.black_mcts.update_state(board_tensor)
+                #self.black_mcts.update_state(board_tensor)
                 a2c_move, a2c_promotion = get_random_move(board_tensor, move_layer)
                 #self.black_values_buffer.append((state.cpu(), game_value.cpu(), entropy.cpu(), log_prob.cpu()))
         return (a2c_move, a2c_promotion)
@@ -688,8 +719,13 @@ class A2CMoveAgent(JLEAIMoveAgent):
     def load_all_models(self):
         self.model.load_models('train')
 
-    def train_step(self, epoch, game_over):
-        self.model.update_network(self.white_values_buffer, self.black_values_buffer, self.white_rewards_buffer, self.black_rewards_buffer, game_over)
+    def train_step(self, epoch):
+        true_end_reward = self.white_mcts.top_node.state_value
+        predicted_end_reward = self.white_mcts.top_node.predicted_value
+        white_p = self.running_white_p
+        white_prob = self.running_white_prob
+        self.model.update_network(true_end_reward, predicted_end_reward, white_p, white_prob)
+        #self.model.update_network(self.white_values_buffer, self.black_values_buffer, self.white_rewards_buffer, self.black_rewards_buffer, game_over)
         #if epoch == 2100:
         #    for group in self.model.optimiser.param_groups:
         #        group['lr'] = group['lr'] * 0.1
@@ -721,7 +757,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
                     batched_board, colour_list, dud_move_count = self.reset_all((batched_board, colour_list, dud_move_count))
                     break
             episode_length = 0
-            self.train_step(move_num, game_over)
+            self.train_step(move_num)
             self.end_episode()
             print(move_num)
         print(f"Wins {self.wins}, Losses {self.losses}")
@@ -889,8 +925,10 @@ if __name__ == '__main__':
     stockfish_agent = StockfishMoveAgent(boards, starting_position)
     if args.algorithm == "DQN":
         our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+        # Recommended batch size = 256
     elif args.algorithm == "A2C":
         our_ai_agent = A2CMoveAgent(boards, starting_position, {})
+        assert boards.get_batch_size() == 1
     #our_ai_agent.load_all_models()
     random_agent = RandomMoveAgent(boards, starting_position)
     our_ai_agent.prepare_for_training()

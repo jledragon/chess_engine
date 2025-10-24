@@ -477,8 +477,23 @@ class A2CChessNetwork:
 
     def resync_models(self):
         self.chess_network.load_state_dict(self.global_network.state_dict())
+    
+    def update_network(self, true_end_reward, predicted_end_reward, white_p, white_prob):
+        cross_entropy_total = 0
+        for prob_index in range(0, len(white_p)):
+            pred_p = white_p[prob_index]
+            true_p = white_prob[prob_index]
+            cross_entropy_total = cross_entropy_total + F.cross_entropy(pred_p, true_p)
+        cross_entropy_mean = cross_entropy_total / len(white_p)  # Would not be zero for ordinary games of chess
+        reward_loss = F.mse_loss(predicted_end_reward, true_end_reward)
+        combined_loss = cross_entropy_mean * 0.3 + reward_loss
+        self.optimiser.zero_grad()
+        combined_loss.backward()
+        self.optimiser.step()
+        print("\n\n\n\n", cross_entropy_mean, reward_loss, predicted_end_reward, true_end_reward, "\n\n\n\n")
 
-    def update_network(self, white_values, black_values, white_rewards, black_rewards, game_over):
+    def old_update_network(self, white_values, black_values, white_rewards, black_rewards, game_over):
+        # Possibly delete this altogether.
         if game_over:
             R_w = torch.zeros(1)
             #R_b = torch.zeros(1)

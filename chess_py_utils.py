@@ -5,6 +5,7 @@ Created on Sun Nov  6 23:08:03 2022
 @author: jledragon
 
 Run "python setup.py install --user, pip install -e ." to build all C++ utils.
+Close Anaconda if permission is denied when running the second command.
 std::cout << "str" works as a python print statement when run in C++.
 """
 

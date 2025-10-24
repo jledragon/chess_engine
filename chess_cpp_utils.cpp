@@ -292,6 +292,24 @@ class BatchedBoard {
         void update_batch_size(int new_batch_size) {
             this->batch_size = new_batch_size;
         }
+        
+        int get_batch_size() {
+            return this->batch_size;
+        }
+        
+        void expand_threefold_repetitions(int num_actions) {
+            // When evaluating in tree-like evaluations such as A2C, copy the threefold repetitions list for all branches of evaluation.
+            std::unordered_map<std::string, int> data = this->threefoldRepetitions.at(0);
+            for (int new_element=1; new_element<num_actions; new_element++) {
+                std::unordered_map<std::string, int> data_copy = data;
+                this->threefoldRepetitions.push_back(data_copy);
+            }
+        }
+        
+        void set_singular_threefold_repetitions() {
+            // Undo expand_threefold_repetitions in A2C. Set this list to have a single element.
+            this->threefoldRepetitions.erase(this->threefoldRepetitions.begin()+1, this->threefoldRepetitions.begin()+this->batch_size);
+        }
 };
 
 std::string get_board_encoding(torch::Tensor compact_pos, int bNum) {
@@ -416,6 +434,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("reset_repetitions", &BatchedBoard::reset_repetitions)
         .def("get_starting_move_count_list", &BatchedBoard::get_starting_move_count_list)
         .def("update_batch_size", &BatchedBoard::update_batch_size)
+        .def("get_batch_size", &BatchedBoard::get_batch_size)
+        .def("expand_threefold_repetitions", &BatchedBoard::expand_threefold_repetitions)
+        .def("set_singular_threefold_repetitions", &BatchedBoard::set_singular_threefold_repetitions)
         .def(py::init<bool, int, int>());
     py::class_<Piece>(m, "Piece")
         .def("get_kind", &Piece::getKind)
