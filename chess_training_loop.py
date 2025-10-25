@@ -141,7 +141,8 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
         game_over_tensor = is_game_over(flipped_board, opponent_move_layer, repetition_status, dud_move_count)
         game_over = torch.any(game_over_tensor, dim=1)
         # Reset threefold repetitions list, move counts and colour wherever the game is over
-        self.boards.reset_repetitions(game_over)
+        if full_game_over_conditions:
+            self.boards.reset_repetitions(game_over)
         reset_move_counts(dud_move_count, game_over)
         reset_colour_list(colour_list, game_over)
         # Flip the boards, reset wherever the game is over
@@ -500,6 +501,7 @@ class MCTSGraph:
         self.model = agent.model
         self.boards = boards
         self.value_mask = torch.tensor([1, -1, 0]).to(torch.float32).cuda()
+        self.batch_size = 1_000
 
     def reset_graph(self):
         self.top_node = None
@@ -534,6 +536,27 @@ class MCTSGraph:
         assert not state_value.shape[0] > 1, "Error - node end state had more than one outcome."
         node.update_actions_and_values(valid_actions, valid_promotions, action_probs, state_value, node.pred_value)
 
+    @compile_if_supported
+    def batched_child_move(self, index_boards, index_actions, index_promotions, index_colour_list):
+        (_, _), (_, board_tensor_half, index_colour_list, opponent_move_layer, game_over_tensor_1) = \
+            self.agent.enact_move((index_actions, index_promotions), (index_boards, index_colour_list, None), full_game_over_conditions=False)
+        we_won = torch.unsqueeze(game_over_tensor_1[:, 0], 1)
+        we_drew_part = torch.any(game_over_tensor_1[:, 1:], axis=1)
+    
+        # Find and enact the best opponent move to complete the state transition.
+        best_opponent_move, best_opponent_promotion = self.model.get_best_opponent_move(board_tensor_half[:,:6,:,:], opponent_move_layer)
+        (_, _), (_, next_board_tensor, index_colour_list, my_next_move_layer, game_over_tensor_2) = \
+            self.agent.enact_move((best_opponent_move, best_opponent_promotion), (board_tensor_half, index_colour_list, None), full_game_over_conditions=False)
+        # If we have won or drawn, play out the opponent move anyway (which will be nonsense, but efficient compute-wise), but do not register a loss or draw.
+        game_over_tensor_2[we_won.repeat(1, game_over_tensor_2.shape[1])] = False
+        game_over_tensor_2[torch.unsqueeze(we_drew_part, 1).repeat(1, game_over_tensor_2.shape[1])] = False
+        we_lost = torch.unsqueeze(game_over_tensor_2[:, 0], 1)
+        we_drew = torch.unsqueeze(torch.logical_or(we_drew_part, torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
+
+        terminals = torch.cat((we_won, we_lost, we_drew), axis=1)
+        pred_moves, pred_values = self.model.get_model_move_and_state(next_board_tensor[:,:6,:,:])
+        return next_board_tensor, my_next_move_layer, terminals, pred_moves, pred_values, best_opponent_move
+
     #@compile_if_supported  # Somehow slows things down?
     def generate_children(self, nodes):
         if len(nodes) == 0:
@@ -561,37 +584,46 @@ class MCTSGraph:
             all_valid_actions = torch.cat(all_valid_actions, dim=0)
             all_promotions = torch.cat(all_promotions, dim=0)
             all_colour_list = torch.cat(all_colour_list, dim=0)
-            print(total_num_actions)
-            self.boards.update_batch_size(total_num_actions)
+            next_boards = []
+            next_move_layers = []
+            all_terminals = []
+            all_pred_moves = []
+            all_pred_values = []
+            best_opponent_moves = []
+            # Keep the child node computation up to some maximum batch size
+            for ind_ in range(0, total_num_actions, self.batch_size):
+                index_boards = all_current_boards[ind_:ind_+self.batch_size,:,:,:]
+                index_actions = all_valid_actions[ind_:ind_+self.batch_size,:]
+                index_promotions = all_promotions[ind_:ind_+self.batch_size,:]
+                index_colour_list = all_colour_list[ind_:ind_+self.batch_size]
+                next_board_tensor, my_next_move_layer, terminals, pred_moves, pred_values, best_opponent_move = self.batched_child_move(
+                    index_boards, index_actions, index_promotions, index_colour_list
+                )
+                next_boards.append(next_board_tensor)
+                next_move_layers.append(my_next_move_layer)
+                all_terminals.append(terminals)
+                all_pred_moves.append(pred_moves)
+                all_pred_values.append(pred_values)
+                best_opponent_moves.append(best_opponent_move)
 
-            (_, _), (_, board_tensor_half, all_colour_list, opponent_move_layer, game_over_tensor_1) = \
-                self.agent.enact_move((all_valid_actions, all_promotions), (all_current_boards, all_colour_list, None), full_game_over_conditions=False)
-            we_won = torch.unsqueeze(game_over_tensor_1[:, 0], 1)
-            we_drew_part = torch.any(game_over_tensor_1[:, 1:], axis=1)
-            
-            # Find and enact the best opponent move to complete the state transition.
-            best_opponent_move, best_opponent_promotion = self.model.get_best_opponent_move(board_tensor_half[:,:6,:,:], opponent_move_layer)
-            (_, _), (_, next_board_tensor, all_colour_list, my_next_move_layer, game_over_tensor_2) = \
-                self.agent.enact_move((best_opponent_move, best_opponent_promotion), (board_tensor_half, all_colour_list, None), full_game_over_conditions=False)
-            # If we have won or drawn, play out the opponent move anyway (which will be nonsense, but efficient compute-wise), but do not register a loss or draw.
-            game_over_tensor_2[we_won.repeat(1, game_over_tensor_2.shape[1])] = False
-            game_over_tensor_2[torch.unsqueeze(we_drew_part, 1).repeat(1, game_over_tensor_2.shape[1])] = False
-            we_lost = torch.unsqueeze(game_over_tensor_2[:, 0], 1)
-            we_drew = torch.unsqueeze(torch.logical_or(we_drew_part, torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
+            next_boards = torch.cat(next_boards, dim=0)
+            next_move_layers = torch.cat(next_move_layers, dim=0)
+            all_terminals = torch.cat(all_terminals, dim=0)
+            all_pred_moves = torch.cat(all_pred_moves, dim=0)
+            all_pred_values = torch.cat(all_pred_values, dim=0)
+            best_opponent_moves = torch.cat(best_opponent_moves, dim=0)
 
-            terminals = torch.cat((we_won, we_lost, we_drew), axis=1)
-            pred_moves, pred_values = self.model.get_model_move_and_state(next_board_tensor[:,:6,:,:])
             # Register the children for this node.
             action_index = 0
             for node in nodes:
                 num_actions = node.valid_actions.shape[0]
                 for act_num in range(num_actions):
                     node_act_num = action_index + act_num
-                    state = torch.unsqueeze(next_board_tensor[node_act_num], 0)
-                    move = torch.unsqueeze(my_next_move_layer[node_act_num], 0)
-                    term = terminals[node_act_num]
+                    state = torch.unsqueeze(next_boards[node_act_num], 0)
+                    move = torch.unsqueeze(next_move_layers[node_act_num], 0)
+                    term = all_terminals[node_act_num]
                     child_node = MCTSNode(state, move, term)
-                    child_node.add_predictions(torch.unsqueeze(pred_moves[node_act_num], 0), pred_values[node_act_num], best_opponent_move[node_act_num])
+                    child_node.add_predictions(torch.unsqueeze(all_pred_moves[node_act_num], 0), all_pred_values[node_act_num], best_opponent_moves[node_act_num])
                     node.children.append(child_node)
                 node.set_non_leaf()
                 action_index += num_actions
@@ -599,25 +631,27 @@ class MCTSGraph:
     def fake_generate_children(self, node):
         node.is_leaf = False
     
-    def get_ucbi(self, node, parent):
-        return node.Q + 2 * math.sqrt(math.log(parent.N) / node.N)
+    @compile_if_supported
+    def get_max_ucbi_index(self, values_tensor):
+        ucbi_tensor = torch.where(
+            values_tensor[:,2] == 0,
+            float('inf'),
+            values_tensor[:,0] + torch.sqrt(torch.log(values_tensor[:,1]) / values_tensor[:,2])
+        )
+        max_index = torch.argmax(ucbi_tensor)
+        return max_index        
     
     def get_max_ucbi_node(self, current_state):
-        ucbi_scores = []
-        for child in current_state.children:
-            if child.N == 0:
-                ucbi_scores.append(float('inf'))
-            else:
-                ucbi_scores.append(self.get_ucbi(child, current_state))
-        highest_score = max(ucbi_scores)
-        return current_state.children[ucbi_scores.index(highest_score)]
+        values_tensor = torch.tensor([[child.Q, current_state.N, child.N] for child in current_state.children]).cuda()
+        max_index = self.get_max_ucbi_index(values_tensor)
+        return current_state.children[max_index]
 
     def generate_graph(self):
         # Compilation time is 2 minutes or longer, so disable this if debugging.
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
         with torch.no_grad():
             nodes_marked_for_generation = []
-            for i in range(0, self.depth):
+            for _ in range(0, self.depth):
                 current_state = self.top_node
                 # Find the next node to roll out and then do so.
                 backup_states = [current_state]
