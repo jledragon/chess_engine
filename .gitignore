@@ -1,0 +1,10 @@
+__pycache__/
+build/
+chess_cpp.cp311-win_amd64.pyd
+dist/
+mobile_cvt/__pycache__/
+chess_cpp.egg-info/
+chess_cpp.cpython-311-x86_64-linux-gnu.so
+stockfish-ubuntu-x86-64-avx2.tar
+stockfish-windows-x86-64-avx2/
+stockfish/

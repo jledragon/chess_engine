@@ -1044,6 +1044,32 @@ template<typename scalar_t> __global__ void expandPromotions_cu(scalar_t* __rest
     }
 }
 
+template<typename scalar_t> __global__ void expandMoves_cu(scalar_t* __restrict__ moves_per_board, scalar_t* __restrict__ newMoves, bool* __restrict__ promoteMask) {
+    int thisBatch = blockIdx.x;
+    int thisArea = thisBatch * 4;
+    int newIndex = 0;
+    for (int i=0; i<thisBatch; i++) {
+        newIndex += 1;
+        if (promoteMask[i] == 1) {
+            newIndex += 3;
+        }
+    }
+    int newArea = newIndex * 4;
+    if (promoteMask[thisBatch] == 1) {
+        for (int i=0; i<4; i++) {
+            newMoves[newArea + i] = moves_per_board[thisArea + i];
+            newMoves[newArea + 4 + i] = moves_per_board[thisArea + i];
+            newMoves[newArea + 8 + i] = moves_per_board[thisArea + i];
+            newMoves[newArea + 12 + i] = moves_per_board[thisArea + i];
+        }
+    }
+    else {
+        for (int i=0; i<4; i++) {
+            newMoves[newArea + i] = moves_per_board[thisArea + i];
+        }
+    }
+}
+
 template<typename scalar_t> __global__ void expandBoards_cu(scalar_t* __restrict__ all_boards, scalar_t* __restrict__ newBoards, bool* __restrict__ promoteMask, const int boardSize, const int encodingSize) {
     int thisBatch = blockIdx.x;
     int thisArea = thisBatch * encodingSize * boardSize * boardSize;
@@ -1066,6 +1092,27 @@ template<typename scalar_t> __global__ void expandBoards_cu(scalar_t* __restrict
         for (int i=0; i<encodingSize * boardSize * boardSize; i++) {
             newBoards[newArea + i] = all_boards[thisArea + i];
         }
+    }
+}
+
+template<typename scalar_t> __global__ void expandValidProbs_cu(float* __restrict__ valid_probs, float* __restrict__ newValidProbs, bool* __restrict__ promoteMask) {
+    int thisBatch = blockIdx.x;
+    int newIndex = 0;
+    for (int i=0; i<thisBatch; i++) {
+        newIndex += 1;
+        if (promoteMask[i] == 1) {
+            newIndex += 3;
+        }
+    }
+    if (promoteMask[thisBatch] == 1) {
+        float previous_valid_prob = valid_probs[thisBatch];
+        newValidProbs[newIndex] = previous_valid_prob / 4;
+        newValidProbs[newIndex + 1] = previous_valid_prob / 4;
+        newValidProbs[newIndex + 2] = previous_valid_prob / 4;
+        newValidProbs[newIndex + 3] = previous_valid_prob / 4;
+    }
+    else {
+        newValidProbs[newIndex] = valid_probs[thisBatch];
     }
 }
 
@@ -1257,6 +1304,20 @@ void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromot
 	cudaDeviceSynchronize();
 }
 
+void expandMoves(torch::Tensor moves_per_board, torch::Tensor newMoves, torch::Tensor promoteMask, const int batch_size) {
+    size_t numberOfBlocks = batch_size;
+
+    AT_DISPATCH_INTEGRAL_TYPES(moves_per_board.type(), "expandMoves_cu", ([&] {
+        expandMoves_cu<scalar_t><<<numberOfBlocks, 1>>>(
+            moves_per_board.data<scalar_t>(),
+            newMoves.data<scalar_t>(),
+            promoteMask.data<bool>()
+		);
+    }));
+
+	cudaDeviceSynchronize();
+}
+
 void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tensor promoteMask, const int batch_size, const int boardSize, const int encodingSize) {
     size_t numberOfBlocks = batch_size;
 
@@ -1267,6 +1328,20 @@ void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tens
             promoteMask.data<bool>(),
             boardSize,
             encodingSize
+		);
+    }));
+
+	cudaDeviceSynchronize();
+}
+
+void expandValidProbs(torch::Tensor valid_probs, torch::Tensor newValidProbs, torch::Tensor promoteMask, const int batch_size) {
+    size_t numberOfBlocks = batch_size;
+
+    AT_DISPATCH_ALL_TYPES(valid_probs.type(), "expandValidProbs_cu", ([&] {
+        expandValidProbs_cu<float><<<numberOfBlocks, 1>>>(
+            valid_probs.data<float>(),
+            newValidProbs.data<float>(),
+            promoteMask.data<bool>()
 		);
     }));
 

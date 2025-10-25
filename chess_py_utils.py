@@ -228,9 +228,7 @@ def possibly_reset_game(batched_board, is_game_over, starting_position):
     return batched_board
 
 @compile_if_supported
-def expand_all_moves(single_board, move_layer_for_board):
-    flat_moves = move_layer_for_board.reshape((move_layer_for_board.shape[0] * move_layer_for_board.shape[1]))
-    legal_moves = torch.where(flat_moves == 1)[0].unsqueeze(1)
+def expand_all_moves(single_board, legal_moves, valid_probs):
     ft1 = legal_moves // 64
     ft2 = legal_moves % 64
     f1 = ft1 // 8
@@ -243,7 +241,9 @@ def expand_all_moves(single_board, move_layer_for_board):
     default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(all_possible_moves.shape[0], 1).to(torch.int8).cuda()
     expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
     expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
-    return expanded_boards, expanded_promotions
+    expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
+    expanded_valid_probs = chess_cpp.expand_valid_probs(valid_probs, is_promotion)
+    return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs
 
 def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
     assert len(move) == 1  # Only do this in Python for a single batch.
