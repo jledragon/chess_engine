@@ -228,7 +228,41 @@ def possibly_reset_game(batched_board, is_game_over, starting_position):
     return batched_board
 
 @compile_if_supported
-def expand_all_moves(single_board, legal_moves, valid_probs):
+def expand_valid_probs(valid_probs, is_promotion, val_prom):
+    # This method does several things:
+    # 1 - everywhere where the move is a promotion, expand the probability vector 4x
+    # 2 - apply the promotion softmax to these four entries - that all probabilities add up to 1 is assumed.
+    #     These four entries should now add up to the unexpanded value.
+    # 3 - return the new, expanded Tensor
+    vp_expanded = valid_probs.unsqueeze(1)
+    # Expand the probabilities, so each one is repeated 4x in a new dimension
+    vp_expanded = vp_expanded.expand(valid_probs.shape[0], 4)
+    prom_expanded = is_promotion.unsqueeze(1)
+    # Zero any repeated probability that's not part of a promotion. We will want to drop it later.
+    ignore_prob_mask = torch.cat(
+        (
+            torch.zeros(prom_expanded.shape[0], 1).to(torch.bool).to(val_prom.device),
+            torch.logical_not(prom_expanded.expand(prom_expanded.shape[0], 3)
+        )
+    ), dim=1)
+    # Multiply the promotion vector by the expanded probability. E.g. if we had 0.3, which was expanded
+    # to [0.3, 0.3, 0.3, 0.3], along with softmax promotion for the move (0.1, 0.1, 0.7, 0.1), multiply
+    # these together to get [0.03, 0.03, 0.21, 0.03]
+    valid_probs_prom_applied = torch.where(
+        prom_expanded,
+        vp_expanded * val_prom,
+        vp_expanded
+    )
+    # Zero anything we don't want
+    # Add 1 to everything for safety. We are essentially setting -1 to anything we don't want, but
+    # still want to use nonzero(). -1 will not be seen anywhere else, since it's a probability
+    wanted_probs = torch.where(ignore_prob_mask, 0, valid_probs_prom_applied + 1).flatten()
+    # Filter the list to finish.
+    filtered_probs = wanted_probs[wanted_probs.nonzero()][:,0] - 1
+    return filtered_probs
+
+@compile_if_supported
+def expand_all_moves(single_board, val_prom, legal_moves, valid_probs):
     ft1 = legal_moves // 64
     ft2 = legal_moves % 64
     f1 = ft1 // 8
@@ -242,7 +276,8 @@ def expand_all_moves(single_board, legal_moves, valid_probs):
     expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
     expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
     expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
-    expanded_valid_probs = chess_cpp.expand_valid_probs(valid_probs, is_promotion)
+    # Keep gradients here
+    expanded_valid_probs = expand_valid_probs(valid_probs, is_promotion, val_prom)
     return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs
 
 def convert_jle_to_UCI_notation(move, promotion, single_board, invert):

@@ -451,10 +451,12 @@ class MCTSNode:
         self.pred_value = None
         self.state_value = None
         self.predicted_value = None
+        self.model_promotion = None
         self.opponent_move_to_get_here = None  # Will be from the opponent's point of view. Does not handle promotions currently.
         self.temperature = 2
         self.opponent_actual_move = None
         self.marked_for_generation = False  # An attempt to make graph generation faster.
+        self.value_with_grad = None
     
     def update_actions_and_values(self, valid_actions, valid_promotions, action_probs, state_value, predicted_value):
         self.P = action_probs
@@ -463,15 +465,16 @@ class MCTSNode:
         self.state_value = state_value
         self.predicted_value = predicted_value
     
-    def add_predictions(self, model_move, pred_value, opponent_move_to_get_here):
+    def add_predictions(self, model_move, model_promotion, pred_value, opponent_move_to_get_here):
         # Add the predictions that led us to this state. This saves us a lot of computation time by batching up model predictions.
         self.model_move = model_move
+        self.model_promotion = model_promotion
         self.pred_value = pred_value
         self.opponent_move_to_get_here = opponent_move_to_get_here
     
     def set_non_leaf(self):
         self.is_leaf = False
-        self.current_board = None
+        #self.current_board = None
         self.moves_for_state = None
         self.model_move = None
         self.pred_value = None
@@ -516,9 +519,9 @@ class MCTSGraph:
             self.top_node.rollout_done = True
             if torch.sum(moves_for_state) > 0:
                 # Possible no grad here.
-                model_moves, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
-                self.top_node.add_predictions(None, state_value, None)  # No opponent move led us here.
-                valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(current_board, model_moves, moves_for_state)
+                model_moves, model_proms, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
+                self.top_node.add_predictions(None, None, state_value, None)  # No opponent move led us here.
+                valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(current_board, model_moves, model_proms, moves_for_state)
                 predicted_value = state_value.squeeze(0)
                 self.top_node.update_actions_and_values(valid_actions, valid_promotions, action_probs, predicted_value, predicted_value)
     
@@ -528,7 +531,7 @@ class MCTSGraph:
         node.rollout_done = True
         # Possible no grad here.
         moves_for_state = node.moves_for_state
-        valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(node.current_board, node.model_move, moves_for_state)
+        valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(node.current_board, node.model_move, node.model_promotion, moves_for_state)
         
         # Deal with the current state's value.
         state_value = self.value_mask[node.terminal_status]
@@ -541,7 +544,7 @@ class MCTSGraph:
         (_, _), (_, board_tensor_half, index_colour_list, opponent_move_layer, game_over_tensor_1) = \
             self.agent.enact_move((index_actions, index_promotions), (index_boards, index_colour_list, None), full_game_over_conditions=False)
         we_won = torch.unsqueeze(game_over_tensor_1[:, 0], 1)
-        we_drew_part = torch.any(game_over_tensor_1[:, 1:], axis=1)
+        we_drew_part = torch.any(game_over_tensor_1[:, 1:3], axis=1)  # Only account for stalemates and too few pieces as draws
     
         # Find and enact the best opponent move to complete the state transition.
         best_opponent_move, best_opponent_promotion = self.model.get_best_opponent_move(board_tensor_half[:,:6,:,:], opponent_move_layer)
@@ -551,11 +554,11 @@ class MCTSGraph:
         game_over_tensor_2[we_won.repeat(1, game_over_tensor_2.shape[1])] = False
         game_over_tensor_2[torch.unsqueeze(we_drew_part, 1).repeat(1, game_over_tensor_2.shape[1])] = False
         we_lost = torch.unsqueeze(game_over_tensor_2[:, 0], 1)
-        we_drew = torch.unsqueeze(torch.logical_or(we_drew_part, torch.any(game_over_tensor_2[:, 1:], axis=1)), 1)
+        we_drew = torch.unsqueeze(torch.logical_or(we_drew_part, torch.any(game_over_tensor_2[:, 1:3], axis=1)), 1)
 
         terminals = torch.cat((we_won, we_lost, we_drew), axis=1)
-        pred_moves, pred_values = self.model.get_model_move_and_state(next_board_tensor[:,:6,:,:])
-        return next_board_tensor, my_next_move_layer, terminals, pred_moves, pred_values, best_opponent_move
+        pred_moves, pred_proms, pred_values = self.model.get_model_move_and_state(next_board_tensor[:,:6,:,:])
+        return next_board_tensor, my_next_move_layer, terminals, pred_moves, pred_proms, pred_values, best_opponent_move
 
     #@compile_if_supported  # Somehow slows things down?
     def generate_children(self, nodes):
@@ -588,6 +591,7 @@ class MCTSGraph:
             next_move_layers = []
             all_terminals = []
             all_pred_moves = []
+            all_pred_proms = []
             all_pred_values = []
             best_opponent_moves = []
             # Keep the child node computation up to some maximum batch size
@@ -596,13 +600,14 @@ class MCTSGraph:
                 index_actions = all_valid_actions[ind_:ind_+self.batch_size,:]
                 index_promotions = all_promotions[ind_:ind_+self.batch_size,:]
                 index_colour_list = all_colour_list[ind_:ind_+self.batch_size]
-                next_board_tensor, my_next_move_layer, terminals, pred_moves, pred_values, best_opponent_move = self.batched_child_move(
+                next_board_tensor, my_next_move_layer, terminals, pred_moves, pred_proms, pred_values, best_opponent_move = self.batched_child_move(
                     index_boards, index_actions, index_promotions, index_colour_list
                 )
                 next_boards.append(next_board_tensor)
                 next_move_layers.append(my_next_move_layer)
                 all_terminals.append(terminals)
                 all_pred_moves.append(pred_moves)
+                all_pred_proms.append(pred_proms)
                 all_pred_values.append(pred_values)
                 best_opponent_moves.append(best_opponent_move)
 
@@ -610,6 +615,7 @@ class MCTSGraph:
             next_move_layers = torch.cat(next_move_layers, dim=0)
             all_terminals = torch.cat(all_terminals, dim=0)
             all_pred_moves = torch.cat(all_pred_moves, dim=0)
+            all_pred_proms = torch.cat(all_pred_proms, dim=0)
             all_pred_values = torch.cat(all_pred_values, dim=0)
             best_opponent_moves = torch.cat(best_opponent_moves, dim=0)
 
@@ -623,7 +629,7 @@ class MCTSGraph:
                     move = torch.unsqueeze(next_move_layers[node_act_num], 0)
                     term = all_terminals[node_act_num]
                     child_node = MCTSNode(state, move, term)
-                    child_node.add_predictions(torch.unsqueeze(all_pred_moves[node_act_num], 0), all_pred_values[node_act_num], best_opponent_moves[node_act_num])
+                    child_node.add_predictions(torch.unsqueeze(all_pred_moves[node_act_num], 0), torch.unsqueeze(all_pred_proms[node_act_num], 0), all_pred_values[node_act_num], best_opponent_moves[node_act_num])
                     node.children.append(child_node)
                 node.set_non_leaf()
                 action_index += num_actions
@@ -649,6 +655,7 @@ class MCTSGraph:
     def generate_graph(self):
         # Compilation time is 2 minutes or longer, so disable this if debugging.
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
+        self.model.set_test_mode()
         with torch.no_grad():
             nodes_marked_for_generation = []
             for _ in range(0, self.depth):
@@ -686,6 +693,7 @@ class MCTSGraph:
                 generation_node.marked_for_generation = False
             self.generate_children(nodes_marked_for_generation)
             nodes_marked_for_generation.clear()
+        self.model.set_train_mode()
     
     def choose_move_and_update_graph(self, is_training):
         child_n_values = [child.N for child in self.top_node.children]
@@ -700,6 +708,8 @@ class MCTSGraph:
         action = self.top_node.valid_actions[choice]
         promotion = self.top_node.valid_promotions[choice]
         self.top_node = self.top_node.children[choice[0]]
+        _, _, value_with_grad = self.model.get_model_move_and_state(self.top_node.current_board[:,:6,:,:])
+        self.top_node.value_with_grad = value_with_grad
         return action, promotion
     
     def update_true_last_opponent_move(self):
@@ -770,8 +780,11 @@ class A2CMoveAgent(JLEAIMoveAgent):
                     self.running_white_prob.append(self.white_mcts.top_node.get_probability_distribution())
                 a2c_move, a2c_promotion = self.white_mcts.choose_move_and_update_graph(is_training=self.training)
             self.boards.update_batch_size(1)  # To be safe.
-            # Next to do 06/05/2025:
-            # Speed up generating graph more, perhaps? - This next.
+            # Next to do 26/10/2025:
+            # Speed up generating graph even more, think of ways
+            # Fix any errors
+            # Check whether what we're sending for the train step is correct (this next)
+            # Make sure what we're using for the train step actually has gradients - anything that comes from the model when it is not called with "torch.no_grad()" will satisfy this
             # Use MCTS for black as well.
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
         else:

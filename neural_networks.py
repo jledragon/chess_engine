@@ -120,6 +120,7 @@ class Simple2DNetwork(nn.Module):
         n_blocks = 4
         self.conv_blocks = []
         self.value_part = value_part
+        self.prom_layer = nn.Linear(8192, 4 * 4096)
         for _ in range(n_blocks):
             self.conv_blocks.append(ResnetBlockFC2D(256, 256).cuda())  # TODO - split the Bayesian version into its own class.
         self.y_layer = nn.Linear(8192, 4096)
@@ -146,13 +147,15 @@ class Simple2DNetwork(nn.Module):
         return self.parameters()
 
     def forward(self, board):
-        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
+        #promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
         xh1 = F.relu(self.bn_1(self.conv_1(board.to(torch.float32))))
         for block in self.conv_blocks:
             xh1 = block(xh1)
         xh2 = F.relu(self.bn_2(self.conv_2(xh1)))
         xh3 = xh2.reshape(xh2.shape[0], 8192)
         out = self.y_layer(xh3)
+        promo = self.prom_layer(xh3)
+        promo = promo.reshape(xh2.shape[0], 4096, 4)
         if not self.value_part:
             return out, promo
         else:
@@ -234,6 +237,7 @@ class SimpleLinearNetwork(nn.Module):
         self.x_layer = nn.Linear(384, 4096)
         self.h_layer = nn.Linear(4096, 4096)
         self.y_layer = nn.Linear(4096, 4096)
+        self.prom_layer = nn.Linear(4096, 4 * 4096)
         nn.init.xavier_uniform_(self.x_layer.weight)
         nn.init.xavier_uniform_(self.h_layer.weight)
         nn.init.xavier_uniform_(self.y_layer.weight)
@@ -256,11 +260,13 @@ class SimpleLinearNetwork(nn.Module):
     
     def forward(self, board):
         board = board.reshape(board.shape[0], 384)
-        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
+        #promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
         xh = F.relu(self.x_layer(board.to(torch.float32)))
         hh = self.h_layer(xh)
         out = self.y_layer(hh)
         out = self.capstone(out)
+        promo = self.prom_layer(hh)
+        promo = promo.reshape(1, 4096, 4)
         return out, promo
 
 
@@ -412,19 +418,20 @@ class A2CChessNetwork:
     
     @compile_if_supported
     def get_model_move_and_state(self, board):
-        out_move, _, state_value = self.chess_network.forward(board)
-        return out_move, state_value
+        out_move, out_prom, state_value = self.chess_network.forward(board)
+        return out_move, out_prom, state_value
     
     @compile_if_supported
-    def get_mcts_moves(self, current_board, out_move, move_layer):
+    def get_mcts_moves(self, current_board, out_move, out_prom, move_layer):
         assert (move_layer.shape[0] == 1 and current_board.shape[0] == 1), "Must play with using single scenario in simulation mode."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
         move_logits = self.get_move_logits(out_move, ml_mask)
         move_probs = self.softmax(move_logits)
         valid_move_indices = torch.argwhere(move_probs)[:,1:]
         valid_probs = move_probs[ml_mask]
-        # TODO future - come up with a way to select the best promotion with the neural network somehow.
-        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(current_board[0], valid_move_indices, valid_probs)
+        valid_promotion_probs_per_move = out_prom[ml_mask]
+        val_prom = self.softmax(valid_promotion_probs_per_move)
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(current_board[0], val_prom, valid_move_indices, valid_probs)
         return expanded_moves, expanded_promotions, expanded_valid_probs
     
     @compile_if_supported
