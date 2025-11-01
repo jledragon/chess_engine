@@ -50,6 +50,15 @@ def get_game_over_message(game_over_for_batch, colour_list):
         elif game_over_for_batch[4]:
             return "No progress made in a while. It's a draw!"
 
+def get_game_value_for_white(major_outcomes_for_batch, colour_list):
+    # TODO - make one for black also
+    if major_outcomes_for_batch[0] and colour_list:
+        return torch.Tensor(1).to(torch.float32).cuda()
+    elif major_outcomes_for_batch[0] and not colour_list:
+        return torch.Tensor(-1).to(torch.float32).cuda()
+    elif torch.any(major_outcomes_for_batch[1:3]):
+        return torch.Tensor(0).to(torch.float32).cuda()
+
 def get_all_binary_moves(batch_size):
     all_moves = torch.arange(0, 4096).unsqueeze(0).cuda()
     all_moves = all_moves.repeat(batch_size, 1)
@@ -140,6 +149,9 @@ def is_game_over(batched_board, move_layer, repetition_status, dud_move_count):
     has_insufficient_material = has_insufficient_mating_material(batched_board).unsqueeze(1)
     getting_nowhere = dud_move_count >= 50
     game_state_per_board = torch.cat((is_checkmate, is_stalemate, has_insufficient_material, repetition_status, getting_nowhere), dim=1)
+    a = torch.max(torch.sum(game_state_per_board[:,0:3], dim=1))
+    if a > 1:
+        print("AAAAAAA") ######
     return game_state_per_board
 
 @compile_if_supported
@@ -229,6 +241,8 @@ def possibly_reset_game(batched_board, is_game_over, starting_position):
 
 @compile_if_supported
 def expand_valid_probs(valid_probs, is_promotion, val_prom):
+    if valid_probs.shape[0] == 0 or torch.sum(is_promotion) == 0:
+        return valid_probs  # Shortcut
     # This method does several things:
     # 1 - everywhere where the move is a promotion, expand the probability vector 4x
     # 2 - apply the promotion softmax to these four entries - that all probabilities add up to 1 is assumed.
