@@ -53,14 +53,11 @@ def get_game_over_message(game_over_for_batch, colour_list):
 def get_game_value_for_white(major_outcomes_for_batch, colour_list):
     # TODO - make one for black also
     if major_outcomes_for_batch[0] and colour_list:
-        return torch.Tensor(1).to(torch.float32).cuda()
+        return torch.Tensor([1]).to(torch.float32).cuda()
     elif major_outcomes_for_batch[0] and not colour_list:
-        return torch.Tensor(-1).to(torch.float32).cuda()
+        return torch.Tensor([-1]).to(torch.float32).cuda()
     elif torch.any(major_outcomes_for_batch[1:3]):
-        return torch.Tensor(0).to(torch.float32).cuda()
-    else:
-        print(major_outcomes_for_batch, colour_list)
-        assert False  # Debugging.
+        return torch.Tensor([0]).to(torch.float32).cuda()
 
 def get_all_binary_moves(batch_size):
     all_moves = torch.arange(0, 4096).unsqueeze(0).cuda()

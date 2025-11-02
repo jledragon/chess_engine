@@ -841,7 +841,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
     def train_step(self, epoch, true_game_value):
         predicted_end_reward = self.white_mcts.top_node.value_with_grad
-        print(true_game_value, predicted_end_reward, "SDFGHJ")
         white_p = self.running_white_p
         white_prob = self.running_white_prob
         self.model.update_network(true_game_value, predicted_end_reward, white_p, white_prob)
@@ -877,8 +876,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
                     self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
                 self.apply_all_rewards(game_over_tensor, (batched_board, opponent_move_layer))
-                #print(move)
-                #print(get_human_readable_board(batched_board[0]))
                 game_over = torch.any(game_over_tensor, dim=1)
                 self.whites_move = not self.whites_move
                 episode_length += 1
@@ -1058,10 +1055,13 @@ if __name__ == '__main__':
     # Starting condition
     args = get_args()
     torch._dynamo.config.cache_size_limit = 64
-    boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, 1)
+    mode = 1
+    mode_str = "full" if mode == 0 else "simplified"
+    boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
     stockfish_agent = StockfishMoveAgent(boards, starting_position)
+    print(f"Training with {mode_str} chess games")
     if args.algorithm == "DQN":
         our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
         # Recommended batch size = 256

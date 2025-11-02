@@ -495,60 +495,6 @@ class A2CChessNetwork:
         self.optimiser.step()
         print("\n\n\n\n", cross_entropy_mean, reward_loss, predicted_end_reward, true_end_reward, "\n\n\n\n")
 
-    def old_update_network(self, white_values, black_values, white_rewards, black_rewards, game_over):
-        # Possibly delete this altogether.
-        if game_over:
-            R_w = torch.zeros(1)
-            #R_b = torch.zeros(1)
-        else:
-            state_w, _, _, _ = white_values[-1]
-            _, _, R_w = self.chess_network.forward(state_w.cuda())
-            R_w = R_w.cpu()[0]
-            #state_b, _, _, _ = black_values[-1]
-            #_, _, R_b = self.chess_network.forward(state_b.cuda())
-            #R_b = R_b.cpu()[0]
-        white_values.append((None, R_w, None, None))
-        #black_values.append((None, R_b, None, None))
-        policy_loss_w = 0
-        value_loss_w = 0
-        gae_w = 0
-        #policy_loss_b = 0
-        #value_loss_b = 0
-        #gae_b = 0
-
-        for step in reversed(range(len(white_rewards))):
-            _, value, entropy, log_prob = white_values[step]
-            R_w = self.gamma * R_w + white_rewards[step]
-            advantage = R_w - value
-            value_loss_w = value_loss_w + 0.5 * advantage.pow(2)
-
-            # Generalized Advantage Estimation
-            next_value = white_values[step + 1][1]
-            delta_t = white_rewards[step] + self.gamma * next_value - value
-            gae_w = gae_w * self.gamma * self.gae_lambda + delta_t
-            policy_loss_w = policy_loss_w - log_prob * gae_w.detach() - self.entropy_coef * entropy
-
-        """for step in reversed(range(len(black_rewards))):
-            _, value, entropy, log_prob = black_values[step]
-            R_b = self.gamma * R_b + black_rewards[step]
-            advantage = R_b - value
-            value_loss_b = value_loss_b + 0.5 * advantage.pow(2)
-
-            # Generalized Advantage Estimation
-            next_value = black_values[step + 1][1]
-            delta_t = black_rewards[step] + self.gamma * next_value - value
-            gae_b = gae_b * self.gamma * self.gae_lambda + delta_t
-            policy_loss_b = policy_loss_b - log_prob * gae_b.detach() - self.entropy_coef * entropy"""
-
-        self.optimiser.zero_grad()
-        #(policy_loss_w + self.value_loss_coef * value_loss_w + policy_loss_b + self.value_loss_coef * value_loss_b).cuda().backward()
-        ((policy_loss_w + self.value_loss_coef * value_loss_w) * 0.1).cuda().backward()
-        torch.nn.utils.clip_grad_norm_(self.chess_network.parameters(), 50)
-        
-        for param, shared_param in zip(self.chess_network.parameters(), self.global_network.parameters()):
-            shared_param._grad = param.grad
-        self.optimiser.step()
-
     def set_train_mode(self):
         self.chess_network.set_train_mode()
         self.train_mode = True
