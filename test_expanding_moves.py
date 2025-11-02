@@ -165,7 +165,8 @@ class TestExpandingMoves(unittest.TestCase):
         flat_moves = move_layer_for_board.reshape((move_layer_for_board.shape[0] * move_layer_for_board.shape[1]))
         legal_moves = torch.where(flat_moves == 1)[0].unsqueeze(1)
         valid_moves = torch.ones((6)).cuda() / 6
-        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(batched_board[0], legal_moves, valid_moves)
+        prom = torch.Tensor([1, 0, 0, 0]).to(torch.float32).cuda()
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(batched_board[0], prom, legal_moves, valid_moves)
         assert torch.equal(expanded_promotions, torch.Tensor([
             [0, 0, 0, 1],
             [0, 0, 0, 1],
@@ -177,7 +178,7 @@ class TestExpandingMoves(unittest.TestCase):
             [0, 0, 1, 0],
             [0, 0, 0, 1],
         ]).to(torch.bool).cuda())
-        assert torch.equal(expanded_valid_probs, torch.Tensor([1/6, 1/6, 1/6, 1/6, 1/6, 1/24, 1/24, 1/24, 1/24]).cuda())
+        assert torch.all(torch.isclose(expanded_valid_probs, torch.Tensor([1/6, 1/6, 1/6, 1/6, 1/6, 1/6, 0, 0, 0]).cuda()))
         assert expanded_boards.shape == (9, 8, 8, 8)
         for i in range(0, 9):
             assert torch.equal(expanded_boards[i], batched_board[0])

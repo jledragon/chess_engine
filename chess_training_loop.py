@@ -475,7 +475,7 @@ class MCTSNode:
     def set_non_leaf(self):
         self.is_leaf = False
         #self.current_board = None
-        #self.moves_for_state = None
+        self.moves_for_state = None
         self.model_move = None
         self.pred_value = None
     
@@ -504,7 +504,7 @@ class MCTSGraph:
         self.model = agent.model
         self.boards = boards
         self.value_mask = torch.tensor([1, -1, 0]).to(torch.float32).cuda()
-        self.batch_size = 1_000
+        self.batch_size = 256
 
     def reset_graph(self):
         self.top_node = None
@@ -523,6 +523,7 @@ class MCTSGraph:
                 valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(current_board, model_moves, model_proms, moves_for_state)
                 predicted_value = state_value.squeeze(0)
                 self.top_node.update_actions_and_values(valid_actions, valid_promotions, action_probs, predicted_value)
+            self.set_top_node_predictions()
     
     @compile_if_supported
     def rollout(self, node):
@@ -655,6 +656,7 @@ class MCTSGraph:
         # Compilation time is 2 minutes or longer, so disable this if debugging.
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
         self.model.set_test_mode()
+        self.boards.update_batch_size(self.batch_size)
         with torch.no_grad():
             nodes_marked_for_generation = []
             for _ in range(0, self.depth):
@@ -692,6 +694,7 @@ class MCTSGraph:
                 generation_node.marked_for_generation = False
             self.generate_children(nodes_marked_for_generation)
             nodes_marked_for_generation.clear()
+        self.boards.update_batch_size(1)
         self.model.set_train_mode()
     
     def choose_move_and_update_graph(self, is_training):
@@ -710,10 +713,11 @@ class MCTSGraph:
         return action, promotion
     
     def set_top_node_predictions(self):
-        current_board = self.top_node.current_board[:,:6,:,:]
-        act, prom, value_with_grad = self.model.get_model_move_and_state(current_board)
-        _, _, action_probs_with_grad = self.model.get_mcts_moves(current_board, act, prom, self.top_node.moves_for_state)
-        self.top_node.value_with_grad = value_with_grad
+        current_board = self.top_node.current_board
+        act, prom, value_with_grad = self.model.get_model_move_and_state(current_board[:,:6,:,:])
+        move_layer = chess_cpp.get_moves_for_player(current_board)
+        _, _, action_probs_with_grad = self.model.get_mcts_moves(current_board, act, prom, move_layer)
+        self.top_node.value_with_grad = value_with_grad.squeeze(0)
         self.top_node.action_probs_with_grad = action_probs_with_grad
     
     def update_true_last_opponent_move(self):
@@ -775,7 +779,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
         if self.whites_move:
             self.white_mcts.update_true_last_opponent_move()  # Potentially resets the graph if opponent did something different to our assumption.
             self.white_mcts.init_top_node_if_empty_graph(board_tensor, move_layer)
-            self.white_mcts.set_top_node_predictions()
             start = time.time()
             if torch.sum(move_layer) > 0:
                 self.white_mcts.generate_graph()  # The new way.
@@ -784,8 +787,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
                     self.running_white_p.append(self.white_mcts.top_node.action_probs_with_grad)
                     self.running_white_prob.append(self.white_mcts.top_node.get_probability_distribution())
                 a2c_move, a2c_promotion = self.white_mcts.choose_move_and_update_graph(is_training=self.training)
-                self.white_mcts.set_top_node_predictions()
             self.boards.update_batch_size(1)  # To be safe.
+            self.white_mcts.set_top_node_predictions()
             # Next to do 26/10/2025:
             # Speed up generating graph even more, think of ways
             # Fix any errors
@@ -838,6 +841,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
     def train_step(self, epoch, true_game_value):
         predicted_end_reward = self.white_mcts.top_node.value_with_grad
+        print(true_game_value, predicted_end_reward, "SDFGHJ")
         white_p = self.running_white_p
         white_prob = self.running_white_prob
         self.model.update_network(true_game_value, predicted_end_reward, white_p, white_prob)
@@ -873,6 +877,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
                     self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
                 self.apply_all_rewards(game_over_tensor, (batched_board, opponent_move_layer))
+                #print(move)
+                #print(get_human_readable_board(batched_board[0]))
                 game_over = torch.any(game_over_tensor, dim=1)
                 self.whites_move = not self.whites_move
                 episode_length += 1

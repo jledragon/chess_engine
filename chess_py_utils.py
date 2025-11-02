@@ -58,6 +58,9 @@ def get_game_value_for_white(major_outcomes_for_batch, colour_list):
         return torch.Tensor(-1).to(torch.float32).cuda()
     elif torch.any(major_outcomes_for_batch[1:3]):
         return torch.Tensor(0).to(torch.float32).cuda()
+    else:
+        print(major_outcomes_for_batch, colour_list)
+        assert False  # Debugging.
 
 def get_all_binary_moves(batch_size):
     all_moves = torch.arange(0, 4096).unsqueeze(0).cuda()
@@ -149,9 +152,6 @@ def is_game_over(batched_board, move_layer, repetition_status, dud_move_count):
     has_insufficient_material = has_insufficient_mating_material(batched_board).unsqueeze(1)
     getting_nowhere = dud_move_count >= 50
     game_state_per_board = torch.cat((is_checkmate, is_stalemate, has_insufficient_material, repetition_status, getting_nowhere), dim=1)
-    a = torch.max(torch.sum(game_state_per_board[:,0:3], dim=1))
-    if a > 1:
-        print("AAAAAAA") ######
     return game_state_per_board
 
 @compile_if_supported
@@ -240,7 +240,7 @@ def possibly_reset_game(batched_board, is_game_over, starting_position):
     return batched_board
 
 @compile_if_supported
-def expand_valid_probs(valid_probs, is_promotion, val_prom):
+def expand_valid_probs(single_board, valid_probs, is_promotion, val_prom):
     if valid_probs.shape[0] == 0 or torch.sum(is_promotion) == 0:
         return valid_probs  # Shortcut
     # This method does several things:
@@ -291,7 +291,7 @@ def expand_all_moves(single_board, val_prom, legal_moves, valid_probs):
     expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
     expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
     # Keep gradients here
-    expanded_valid_probs = expand_valid_probs(valid_probs, is_promotion, val_prom)
+    expanded_valid_probs = expand_valid_probs(single_board, valid_probs, is_promotion, val_prom)
     return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs
 
 def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
