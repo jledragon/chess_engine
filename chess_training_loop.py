@@ -785,7 +785,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
             start = time.time()
             if torch.sum(move_layer) > 0:
                 self.white_mcts.generate_graph()  # The new way.
-                print(time.time() - start)
+                #print(time.time() - start)
                 if self.training:
                     self.running_white_p.append(self.white_mcts.top_node.action_probs_with_grad)
                     self.running_white_prob.append(self.white_mcts.top_node.get_probability_distribution())
@@ -867,7 +867,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
         dud_move_count = boards.get_starting_move_count_list()
         colour_list = torch.ones((1)).to(torch.bool).cuda()
         
-        end_epoch = start_epoch + 200
+        end_epoch = start_epoch + 100
         self.wins = 0
         self.losses = 0
         for move_num in range(start_epoch, end_epoch):
@@ -1058,7 +1058,7 @@ if __name__ == '__main__':
     # Starting condition
     args = get_args()
     torch._dynamo.config.cache_size_limit = 64
-    mode = 1
+    mode = 0
     mode_str = "full" if mode == 0 else "simplified"
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
