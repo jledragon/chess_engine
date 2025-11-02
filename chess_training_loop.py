@@ -458,11 +458,13 @@ class MCTSNode:
         self.marked_for_generation = False  # An attempt to make graph generation faster.
         self.value_with_grad = None  # These two values are used for actual training.
         self.action_probs_with_grad = None
+        self.state_value = None  # Information about predicted value or better - may be GT terminal
     
-    def update_actions_and_values(self, valid_actions, valid_promotions, action_probs, predicted_value):
+    def update_actions_and_values(self, valid_actions, valid_promotions, action_probs, state_value, predicted_value):
         self.P = action_probs
         self.valid_actions = valid_actions
         self.valid_promotions = valid_promotions
+        self.state_value = state_value
         self.predicted_value = predicted_value
     
     def add_predictions(self, model_move, model_promotion, pred_value, opponent_move_to_get_here):
@@ -520,9 +522,10 @@ class MCTSGraph:
             if torch.sum(moves_for_state) > 0:
                 # Possible no grad here.
                 model_moves, model_proms, state_value = self.model.get_model_move_and_state(current_board[:,:6,:,:])
+                self.top_node.add_predictions(None, None, state_value, None)  # No opponent move led us here.
                 valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(current_board, model_moves, model_proms, moves_for_state)
                 predicted_value = state_value.squeeze(0)
-                self.top_node.update_actions_and_values(valid_actions, valid_promotions, action_probs, predicted_value)
+                self.top_node.update_actions_and_values(valid_actions, valid_promotions, action_probs, predicted_value, predicted_value)
             self.set_top_node_predictions()
     
     @compile_if_supported
@@ -535,9 +538,9 @@ class MCTSGraph:
         
         # Deal with the current state's value.
         state_value = self.value_mask[node.terminal_status]
-        if state_value is not None:
-            assert not state_value.shape[0] > 1, f"Error - node end state had more than one outcome. Terminal status for node: {node.terminal_status}"
-        node.update_actions_and_values(valid_actions, valid_promotions, action_probs, node.pred_value)
+        state_value = node.pred_value if state_value.shape[0] == 0 else state_value
+        assert not state_value.shape[0] > 1, f"Error - node end state had more than one outcome. Terminal status for node: {node.terminal_status}"
+        node.update_actions_and_values(valid_actions, valid_promotions, action_probs, state_value, node.pred_value)
 
     @compile_if_supported
     def batched_child_move(self, index_boards, index_actions, index_promotions, index_colour_list):
@@ -683,7 +686,7 @@ class MCTSGraph:
                     self.fake_generate_children(current_state)
                     nodes_marked_for_generation.append(current_state)
                 # Backpropagate
-                value = current_state.predicted_value
+                value = current_state.state_value
                 for back_state in backup_states:
                     back_state.N = back_state.N + 1
                     back_state.W = back_state.W + value
