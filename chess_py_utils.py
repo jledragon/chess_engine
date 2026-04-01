@@ -5,6 +5,7 @@ Created on Sun Nov  6 23:08:03 2022
 @author: jledragon
 
 Run "python setup.py install --user, pip install -e ." to build all C++ utils.
+If "pip install -e ." does not work, try "pip install --no-build-isolation -e ."
 Close Anaconda if permission is denied when running the second command.
 std::cout << "str" works as a python print statement when run in C++.
 """
@@ -14,23 +15,22 @@ from torch.nn.functional import one_hot
 import chess_cpp
 from bidict import bidict
 from string import Template
+import os
 
 
 _cols = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 _reverse_cols = {'a': 0, 'b': 1, 'c': 2, 'd': 3, 'e': 4, 'f': 5, 'g': 6, 'h': 7}
 _promotion_indices = bidict({'n': 0, 'b': 1, 'r': 2, 'q': 3})
 
-def compile_if_supported(func):
-    try:
-        # This pattern is fast when compile is valid, i.e. when we would want it to be fast.
+
+def conditional_compile(func):
+    if os.environ.get('try_compile', 'False').lower() == 'true':
         @torch.compile
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
-    except RuntimeError:
-        # More general - don't tie it to OS/architecture, simply whether compile is supported or not.
+    else:
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
-    # All other errors will raise an Exception as usual.
     return wrapper
 
 def get_game_over_message(game_over_for_batch, colour_list):
@@ -65,7 +65,7 @@ def get_all_binary_moves(batch_size):
     mask = 2**torch.arange(11, -1, -1).to(all_moves.device, all_moves.dtype)
     return all_moves.unsqueeze(-1).bitwise_and(mask).ne(0).float()
 
-@compile_if_supported
+@conditional_compile
 def flip_board(batched_board, colour_list):
     # Flip the colours anywhere we have a piece
     # True is white, False is black.
@@ -84,7 +84,7 @@ def flip_board(batched_board, colour_list):
     return_board = torch.flip(return_board, (2, 3))
     return return_board, torch.logical_not(colour_list)
 
-@compile_if_supported
+@conditional_compile
 def has_insufficient_mating_material(batched_board):
     # All sufficient rules are irregardless of colour.
     sufficient_1 = torch.sum(
@@ -109,7 +109,7 @@ def has_insufficient_mating_material(batched_board):
     )
     return insufficient
 
-@compile_if_supported
+@conditional_compile
 def get_white_view(batched_board, flipped_board, colour_list):
     exp_col_list = colour_list.unsqueeze(1).unsqueeze(1).unsqueeze(1)
     white_view = torch.where(
@@ -117,7 +117,7 @@ def get_white_view(batched_board, flipped_board, colour_list):
     )
     return white_view
 
-@compile_if_supported
+@conditional_compile
 def get_repetition_status(boards, batched_board):
     p64 = torch.ones((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
     p128 = torch.zeros((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
@@ -128,7 +128,7 @@ def get_repetition_status(boards, batched_board):
     repetition_status = boards.check_threefold_repetition(compact_pos)
     return repetition_status
 
-@compile_if_supported
+@conditional_compile
 def get_single_board_encoding(batched_board):
     assert batched_board.shape[0] == 1, "Only boards with batch size 1 are supported."
     p64 = torch.ones((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
@@ -140,7 +140,7 @@ def get_single_board_encoding(batched_board):
     board_encoding = chess_cpp.get_board_encoding(compact_pos, 0)  # Just check the first element
     return board_encoding
 
-@compile_if_supported
+@conditional_compile
 def is_game_over(batched_board, move_layer, repetition_status, dud_move_count):
     num_moves = torch.sum(move_layer, (1, 2))
     game_over = (num_moves == 0)
@@ -151,7 +151,7 @@ def is_game_over(batched_board, move_layer, repetition_status, dud_move_count):
     game_state_per_board = torch.cat((is_checkmate, is_stalemate, has_insufficient_material, repetition_status, getting_nowhere), dim=1)
     return game_state_per_board
 
-@compile_if_supported
+@conditional_compile
 def get_moves_for_player_with_reuse(batched_board, game_over, opponent_move_layer):
     move_layer = chess_cpp.get_moves_for_player_with_skip(batched_board, torch.logical_not(game_over))
     move_layer_reuse = torch.where(
@@ -161,7 +161,7 @@ def get_moves_for_player_with_reuse(batched_board, game_over, opponent_move_laye
     )
     return move_layer_reuse
 
-@compile_if_supported
+@conditional_compile
 def get_random_move(batched_board, move_layer):
     num_moves = torch.sum(move_layer, (1, 2))
     random_move = (torch.rand(size=num_moves.shape).cuda() * num_moves).to(torch.int8)
@@ -171,7 +171,7 @@ def get_random_move(batched_board, move_layer):
     one_hot_promotion = one_hot(random_promotion, num_classes=4).to(torch.int8)
     return random_select, one_hot_promotion
 
-@compile_if_supported
+@conditional_compile
 def flip_episode(states, actions, next_states):
     indices_to_flip = torch.rand(size=(states.shape[0],)).cuda() > 0.5
     states_to_flip = states[indices_to_flip]
@@ -188,7 +188,7 @@ def flip_episode(states, actions, next_states):
     next_states[indices_to_flip] = flipped_next_states
     return states, (action_move, actions[1]), next_states
 
-@compile_if_supported
+@conditional_compile
 def get_firepower_score(batched_board, for_opponent):
     # Careful - this will deal with a flipped view.
     player_num = 0 if for_opponent else 1
@@ -221,22 +221,22 @@ def get_firepower_score(batched_board, for_opponent):
     batched_firepower = torch.sum(firepower_board, (1,2))
     return batched_firepower
 
-@compile_if_supported
+@conditional_compile
 def reset_move_counts(move_count, is_game_over):
     move_count[is_game_over, :] = 0
     return move_count
 
-@compile_if_supported
+@conditional_compile
 def reset_colour_list(colour_list, is_game_over):
     colour_list[is_game_over] = True
     return colour_list
 
-@compile_if_supported
+@conditional_compile
 def possibly_reset_game(batched_board, is_game_over, starting_position):
     batched_board[is_game_over] = starting_position
     return batched_board
 
-@compile_if_supported
+@conditional_compile
 def expand_valid_probs(single_board, valid_probs, is_promotion, val_prom):
     if valid_probs.shape[0] == 0 or torch.sum(is_promotion) == 0:
         return valid_probs  # Shortcut
@@ -272,7 +272,7 @@ def expand_valid_probs(single_board, valid_probs, is_promotion, val_prom):
     filtered_probs = wanted_probs[wanted_probs.nonzero()][:,0] - 1
     return filtered_probs
 
-@compile_if_supported
+@conditional_compile
 def expand_all_moves(single_board, val_prom, legal_moves, valid_probs):
     ft1 = legal_moves // 64
     ft2 = legal_moves % 64
@@ -281,7 +281,7 @@ def expand_all_moves(single_board, val_prom, legal_moves, valid_probs):
     f2 = ft2 // 8
     t2 = ft2 % 8
     all_possible_moves = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
-    copied_boards = single_board.unsqueeze(0).repeat(all_possible_moves.shape[0], 1, 1, 1)
+    copied_boards = single_board.repeat(all_possible_moves.shape[0], 1, 1, 1)
     is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards, all_possible_moves)
     default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(all_possible_moves.shape[0], 1).to(torch.int8).cuda()
     expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
@@ -299,6 +299,7 @@ def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
     promo_letter = ""
     if enc[0] == 1 and piece_enc_sum == 1 and move[0][2] == 7:
         promo_index = torch.nonzero(promotion)
+        print(promotion, promo_index, "debug")
         assert promo_index.shape[1] == 1
         promo_letter = _promotion_indices.inverse(promo_index[0][0])
     if invert:
@@ -314,56 +315,99 @@ def convert_UCI_to_jle_notation(move, invert):
         jle_promotion[_promotion_indices[move[4]]] = 1
     return jle_move, jle_promotion
 
-def get_human_readable_board(single_board_element):
-    board_str = Template("""
-    +---+---+---+---+---+---+---+---+
-    | $a8 | $b8 | $c8 | $d8 | $e8 | $f8 | $g8 | $h8 | 8
-    +---+---+---+---+---+---+---+---+
-    | $a7 | $b7 | $c7 | $d7 | $e7 | $f7 | $g7 | $h7 | 7
-    +---+---+---+---+---+---+---+---+
-    | $a6 | $b6 | $c6 | $d6 | $e6 | $f6 | $g6 | $h6 | 6
-    +---+---+---+---+---+---+---+---+
-    | $a5 | $b5 | $c5 | $d5 | $e5 | $f5 | $g5 | $h5 | 5
-    +---+---+---+---+---+---+---+---+
-    | $a4 | $b4 | $c4 | $d4 | $e4 | $f4 | $g4 | $h4 | 4
-    +---+---+---+---+---+---+---+---+
-    | $a3 | $b3 | $c3 | $d3 | $e3 | $f3 | $g3 | $h3 | 3
-    +---+---+---+---+---+---+---+---+
-    | $a2 | $b2 | $c2 | $d2 | $e2 | $f2 | $g2 | $h2 | 2
-    +---+---+---+---+---+---+---+---+
-    | $a1 | $b1 | $c1 | $d1 | $e1 | $f1 | $g1 | $h1 | 1
-    +---+---+---+---+---+---+---+---+
-      a   b   c   d   e   f   g   h
-    """)
+def save_full_game_artifacts(artifacts_dir, game_num, states, moves, promotions):
+    game_file_name = artifacts_dir / f"game_{str(game_num)}"
+    game_file = game_file_name.with_suffix(".txt")
+    game_trail = "Start state, white to play:\n" + get_human_readable_board(states[0][0,:,:,:], True) + "\n"
+    num_moves = len(moves)
+    turn = True
+    for move_num in range(num_moves):
+        turn_str = f"{'black' if turn else 'white'} to play"
+        readable_move = convert_jle_to_UCI_notation(moves[move_num], promotions[move_num], states[move_num], not turn)
+        game_trail += f"Logged move: {readable_move}\n\n"
+        current_state = states[move_num + 1]
+        state_str = get_human_readable_board(current_state[0,:,:,:], not turn)
+        game_trail += f"Current state, {turn_str}:\n{state_str}\n"
+        turn = not turn
+    game_file.write_text(game_trail, encoding="utf-8")
+
+def get_human_readable_board(single_board_element, as_white):
+    if as_white:
+        board_str = Template(
+            """
+            +---+---+---+---+---+---+---+---+
+            | $a8 | $b8 | $c8 | $d8 | $e8 | $f8 | $g8 | $h8 | 8
+            +---+---+---+---+---+---+---+---+
+            | $a7 | $b7 | $c7 | $d7 | $e7 | $f7 | $g7 | $h7 | 7
+            +---+---+---+---+---+---+---+---+
+            | $a6 | $b6 | $c6 | $d6 | $e6 | $f6 | $g6 | $h6 | 6
+            +---+---+---+---+---+---+---+---+
+            | $a5 | $b5 | $c5 | $d5 | $e5 | $f5 | $g5 | $h5 | 5
+            +---+---+---+---+---+---+---+---+
+            | $a4 | $b4 | $c4 | $d4 | $e4 | $f4 | $g4 | $h4 | 4
+            +---+---+---+---+---+---+---+---+
+            | $a3 | $b3 | $c3 | $d3 | $e3 | $f3 | $g3 | $h3 | 3
+            +---+---+---+---+---+---+---+---+
+            | $a2 | $b2 | $c2 | $d2 | $e2 | $f2 | $g2 | $h2 | 2
+            +---+---+---+---+---+---+---+---+
+            | $a1 | $b1 | $c1 | $d1 | $e1 | $f1 | $g1 | $h1 | 1
+            +---+---+---+---+---+---+---+---+
+              a   b   c   d   e   f   g   h
+            """
+        )
+    else:
+        board_str = Template(
+            """
+              +---+---+---+---+---+---+---+---+
+            1 | $a8 | $b8 | $c8 | $d8 | $e8 | $f8 | $g8 | $h8 |
+              +---+---+---+---+---+---+---+---+
+            2 | $a7 | $b7 | $c7 | $d7 | $e7 | $f7 | $g7 | $h7 |
+              +---+---+---+---+---+---+---+---+
+            3 | $a6 | $b6 | $c6 | $d6 | $e6 | $f6 | $g6 | $h6 |
+              +---+---+---+---+---+---+---+---+
+            4 | $a5 | $b5 | $c5 | $d5 | $e5 | $f5 | $g5 | $h5 |
+              +---+---+---+---+---+---+---+---+
+            5 | $a4 | $b4 | $c4 | $d4 | $e4 | $f4 | $g4 | $h4 |
+              +---+---+---+---+---+---+---+---+
+            6 | $a3 | $b3 | $c3 | $d3 | $e3 | $f3 | $g3 | $h3 |
+              +---+---+---+---+---+---+---+---+
+            7 | $a2 | $b2 | $c2 | $d2 | $e2 | $f2 | $g2 | $h2 |
+              +---+---+---+---+---+---+---+---+
+            8 | $a1 | $b1 | $c1 | $d1 | $e1 | $f1 | $g1 | $h1 |
+              +---+---+---+---+---+---+---+---+
+                h   g   f   e   d   c   b   a
+            """
+        )
     subst_dict = {}
     for col in range(0, 8):
         for row in range(0, 8):
             letter = " "
             if single_board_element[5][col][row] == 1:
+                # White gets capitals, black gets lower case.
                 if single_board_element[0][col][row] == 1:
-                    letter = 'p'
+                    letter = 'p' if as_white else 'P'
                 elif single_board_element[1][col][row] == 1:
-                    letter = 'n'
+                    letter = 'n' if as_white else 'N'
                 elif single_board_element[2][col][row] == 1 and single_board_element[3][col][row] == 1:
-                    letter = 'q'
+                    letter = 'q' if as_white else 'Q'
                 elif single_board_element[2][col][row] == 1:
-                    letter = 'b'
+                    letter = 'b' if as_white else 'B'
                 elif single_board_element[3][col][row] == 1:
-                    letter = 'r'
+                    letter = 'r' if as_white else 'R'
                 elif single_board_element[4][col][row] == 1:
-                    letter = 'k'
+                    letter = 'k' if as_white else 'K'
             else:
                 if single_board_element[0][col][row] == 1:
-                    letter = 'P'
+                    letter = 'P' if as_white else 'p'
                 elif single_board_element[1][col][row] == 1:
-                    letter = 'N'
+                    letter = 'N' if as_white else 'n'
                 elif single_board_element[2][col][row] == 1 and single_board_element[3][col][row] == 1:
-                    letter = 'Q'
+                    letter = 'Q' if as_white else 'q'
                 elif single_board_element[2][col][row] == 1:
-                    letter = 'B'
+                    letter = 'B' if as_white else 'b'
                 elif single_board_element[3][col][row] == 1:
-                    letter = 'R'
+                    letter = 'R' if as_white else 'r'
                 elif single_board_element[4][col][row] == 1:
-                    letter = 'K'
+                    letter = 'K' if as_white else 'k'
             subst_dict[f"{_cols[row]}{col + 1}"] = letter
     return board_str.substitute(subst_dict)

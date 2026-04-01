@@ -12,9 +12,8 @@ from mobile_cvt.MV2Block import MV2Block
 from mobile_cvt.MobileCvTBlock import MobileCvTBlock
 from mobile_cvt.MobileCvT import MobileCvT
 from mobile_cvt.ConvUser import ConvUser
-from chess_py_utils import get_random_move, get_human_readable_board, compile_if_supported, expand_all_moves
+from chess_py_utils import get_random_move, conditional_compile, expand_all_moves
 from blitz.modules import BayesianLinear, BayesianConv2d
-from itertools import chain
 import chess_cpp
 import os
 from einops.layers.torch import Reduce
@@ -291,7 +290,7 @@ class DQNChessNetwork:
         #self.MSELoss_function = nn.MSELoss()
         #self.cross_entropy = nn.CrossEntropyLoss()
     
-    @compile_if_supported
+    @conditional_compile
     def get_allowed_max(self, out_move, move_layer):
         filtered_out = torch.where(
             move_layer.reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2])) == 1,
@@ -388,16 +387,11 @@ class DQNChessNetwork:
 
 class A2CChessNetwork:
     def __init__(self):
-        self.global_network = Simple2DNetwork(True).cuda()
         self.chess_network = Simple2DNetwork(True).cuda()
-        try:
-            self.global_network = torch.compile(self.global_network)
+        if os.environ.get('try_compile', 'False').lower() == 'true':
             self.chess_network = torch.compile(self.chess_network)
-        except RuntimeError:
-            print("Warning - compile not supported.")
-        self.global_network.eval()
         self.lr = self.chess_network.lr  # All use the same class, so all lr should be the same.
-        self.optimiser = SharedAdamW(self.global_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
+        self.optimiser = SharedAdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
         self.optimiser.share_memory()
         self.softmax = nn.Softmax(dim=1)
         self.log_softmax = nn.LogSoftmax(dim=1)
@@ -407,7 +401,7 @@ class A2CChessNetwork:
         self.entropy_coef = 0.01
         self.value_loss_coef = 2.0
 
-    @compile_if_supported
+    @conditional_compile
     def get_move_logits(self, out_move, move_layer):
         filtered_out = torch.where(
             move_layer,
@@ -416,12 +410,12 @@ class A2CChessNetwork:
         )
         return filtered_out
     
-    @compile_if_supported
+    @conditional_compile
     def get_model_move_and_state(self, board):
         out_move, out_prom, state_value = self.chess_network.forward(board)
         return out_move, out_prom, state_value
     
-    @compile_if_supported
+    @conditional_compile
     def get_mcts_moves(self, current_board, out_move, out_prom, move_layer):
         assert (move_layer.shape[0] == 1 and current_board.shape[0] == 1), "Must play with using single scenario in simulation mode."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
@@ -431,10 +425,10 @@ class A2CChessNetwork:
         valid_probs = move_probs[ml_mask]
         valid_promotion_probs_per_move = out_prom[ml_mask]
         val_prom = self.softmax(valid_promotion_probs_per_move)
-        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(current_board[0], val_prom, valid_move_indices, valid_probs)
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs)
         return expanded_moves, expanded_promotions, expanded_valid_probs
     
-    @compile_if_supported
+    @conditional_compile
     def get_best_opponent_move(self, board, move_layer):
         # Opponent move for MCTS. Assume promotions to Queens
         out_move, out_prom, _ = self.chess_network.forward(board)
@@ -451,49 +445,21 @@ class A2CChessNetwork:
         t2 = ft2 % 8
         nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
         return nn_move, out_prom
-
-    def get_move(self, board, move_layer):  # Delete this?
-        out_move, out_prom, value = self.chess_network.forward(board)
-        ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
-        move_logits = self.get_move_logits(out_move, ml_mask)
-        move_probs = self.softmax(move_logits)
-        move_log_probs = self.log_softmax(move_logits)  # Apparently, doing log(softmax(x)) is numerically unstable.
-        if self.train_mode:
-            action = move_probs.multinomial(num_samples=1)
-        else:
-            action = torch.argmax(move_probs, dim=1, keepdim=True)
-        sm_prom = self.softmax(out_prom)
-        max_out_prom = torch.argmax(sm_prom, dim=1)
-        nn_prom = F.one_hot(max_out_prom, num_classes=4).to(torch.int8)
-        ft1 = action // 64
-        ft2 = action % 64
-        f1 = ft1 // 8
-        t1 = ft1 % 8
-        f2 = ft2 // 8
-        t2 = ft2 % 8
-        # A bunch of stuff that can probably go from here below.
-        nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
-        entropy = -(move_log_probs[ml_mask] * move_probs[ml_mask]).unsqueeze(0).sum(1, keepdim=True)
-        log_prob = move_log_probs.gather(1, action)
-        # A2C extras also returned here for computing the loss function
-        return nn_move, nn_prom, value, entropy, log_prob
-
-    def resync_models(self):
-        self.chess_network.load_state_dict(self.global_network.state_dict())
     
-    def update_network(self, true_end_reward, predicted_end_reward, white_p, white_prob):
+    def update_network(self, state, graph_probs, final_game_value):
+        pred_act, pred_prom, pred_value = self.get_model_move_and_state(state[:,:6,:,:])
+        move_layer = chess_cpp.get_moves_for_player(state)
         cross_entropy_total = 0
-        for prob_index in range(0, len(white_p)):
-            pred_p = white_p[prob_index]
-            true_p = white_prob[prob_index]
-            cross_entropy_total = cross_entropy_total + F.cross_entropy(pred_p, true_p)
-        cross_entropy_mean = cross_entropy_total / len(white_p)  # Would not be zero for ordinary games of chess
-        reward_loss = F.mse_loss(predicted_end_reward, true_end_reward)
-        combined_loss = cross_entropy_mean * 0.3 + 3 * reward_loss
+        for b_ind in range(state.shape[0]):
+            _, _, action_probs = self.get_mcts_moves(state[b_ind:b_ind+1,:,:,:], pred_act[b_ind:b_ind+1,:], pred_prom[b_ind:b_ind+1,:,:], move_layer[b_ind:b_ind+1,:,:])
+            cross_entropy_total = cross_entropy_total + F.cross_entropy(action_probs, graph_probs[b_ind])
+        cross_entropy_mean = cross_entropy_total / state.shape[0]
+        reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
+        combined_loss = cross_entropy_mean + 2 * reward_loss
+        print(f"Cross entropy loss: {cross_entropy_mean}, Reward loss: {reward_loss}")
         self.optimiser.zero_grad()
         combined_loss.backward()
         self.optimiser.step()
-        print("\n\n\n\n", cross_entropy_mean, reward_loss, predicted_end_reward, true_end_reward, "\n\n\n\n")
 
     def set_train_mode(self):
         self.chess_network.set_train_mode()
@@ -505,7 +471,7 @@ class A2CChessNetwork:
     
     def save_models(self):
         torch.save({
-            "model_state": self.global_network.state_dict(),
+            "model_state": self.chess_network.state_dict(),
             "optimiser_state": self.optimiser.state_dict(),
         }, 'models/last_model')
     
@@ -514,11 +480,9 @@ class A2CChessNetwork:
             print("Warning - saved model files not found.")
         else:
             last_model = torch.load('models/last_model')
-            self.global_network.load_state_dict(last_model["model_state"])
+            self.chess_network.load_state_dict(last_model["model_state"])
             self.optimiser.load_state_dict(last_model["optimiser_state"])
             if purpose == 'train':
-                self.global_network.eval()
                 self.chess_network.train()
             elif purpose == 'eval':
-                self.global_network.eval()
                 self.chess_network.eval()

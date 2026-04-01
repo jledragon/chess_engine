@@ -63,6 +63,41 @@ class TestExpandingMoves(unittest.TestCase):
         is_promotion = chess_cpp.get_pawn_promote_move_mask(batched_board, dummy_moves)
         assert torch.equal(is_promotion, torch.Tensor([False, True, True, True, True, True, True, True, True, False]).cuda())
     
+    def testPromoteMovesDetection_2(self):
+        # python -m unittest test_expanding_moves.TestExpandingMoves.testPromoteMovesDetection_2
+        # Real case - debugging
+        boards = chess_cpp.BatchedBoard(False, 1, 0)
+        king_0 = chess_cpp.Piece('k', True, 0, 0)
+        queen_0 = chess_cpp.Piece('q', True, 1, 0)
+        rook_0 = chess_cpp.Piece('r', True, 0, 1)
+        king_1 = chess_cpp.Piece('k', False, 7, 7)
+        queen_1 = chess_cpp.Piece('q', False, 6, 7)
+        rook_1 = chess_cpp.Piece('r', False, 7, 6)
+        boards.setPiece(0, king_0)
+        boards.setPiece(0, queen_0)
+        boards.setPiece(0, rook_0)
+        boards.setPiece(0, king_1)
+        boards.setPiece(0, queen_1)
+        boards.setPiece(0, rook_1)
+
+        batched_board = boards.to_tensor().cuda()
+        move_layer = chess_cpp.get_moves_for_player(batched_board)
+        ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
+        filtered_out = torch.where(
+            ml_mask, 1, 0,
+        )
+        valid_move_indices = torch.argwhere(filtered_out)[:,1:]
+        ft1 = valid_move_indices // 64
+        ft2 = valid_move_indices % 64
+        f1 = ft1 // 8
+        t1 = ft1 % 8
+        f2 = ft2 // 8
+        t2 = ft2 % 8
+        all_possible_moves = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
+        copied_boards = batched_board.repeat(all_possible_moves.shape[0], 1, 1, 1)
+        is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards, all_possible_moves)
+        assert torch.equal(is_promotion, torch.Tensor([False] * 33).cuda())
+
     def testExpandPromotions(self):
         promotion_mask = torch.Tensor([False, True, True, True, True, True, True, True, True, False]).to(torch.bool).cuda()
         promotions = torch.Tensor([
