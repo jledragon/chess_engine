@@ -76,19 +76,6 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
     """
     
     @abstractmethod
-    def _get_my_rewards(self, game_over_tensor, opponent_move_layer):
-        pass
-    
-    @abstractmethod
-    def _update_opponent_rewards(self, game_over_tensor, opponent_move_layer):
-        pass
-    
-    def apply_all_rewards(self, game_over_tensor, game_state_bundle):
-        rewards = self._get_my_rewards(game_over_tensor, game_state_bundle)
-        self._update_opponent_rewards(game_over_tensor, game_state_bundle)
-        return rewards
-    
-    @abstractmethod
     def prepare_for_training(self):
         pass
     
@@ -327,6 +314,11 @@ class DQNMoveAgent(JLEAIMoveAgent):
         rewards = rewards + num_moves_reward + firepower_reward + firepower_per_num_moves_reward
         return rewards
     
+    def apply_all_rewards(self, game_over_tensor, game_state_bundle):
+        rewards = self._get_my_rewards(game_over_tensor, game_state_bundle)
+        self._update_opponent_rewards(game_over_tensor, game_state_bundle)
+        return rewards
+
     @conditional_compile
     def _update_opponent_rewards(self, game_over_tensor, game_state_bundle):
         board_state, opponent_move_layer = game_state_bundle
@@ -760,12 +752,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
     def __init__(self, boards, starting_position, enabled_optional_rewards, artifacts_dir):
         self.boards = boards
         self.starting_position = starting_position
-        self.white_values_buffer = []
-        self.white_rewards_buffer = []
-        self.black_values_buffer = []
-        self.black_rewards_buffer = []
         self.running_white_states = []
         self.running_white_prob = []
+        self.running_black_states = []
+        self.running_black_prob = []
         self.model = A2CChessNetwork()
         self.training = True
         self.whites_move = True  # True is white, False is black. We can reason this way with a batch size of 1.
@@ -785,74 +775,59 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
     def end_episode(self):
         self.whites_move = True
-        self.white_values_buffer.clear()
-        self.white_rewards_buffer.clear()
-        self.black_values_buffer.clear()
-        self.black_rewards_buffer.clear()
         self.running_white_prob.clear()
         self.running_white_states.clear()
+        self.running_black_prob.clear()
+        self.running_black_states.clear()
         # torch.cuda.empty_cache()  # Dodgy - nvidia-smi is all over the place with this.
 
     def start_episode(self):
         self.white_mcts.reset_graph()
         self.black_mcts.reset_graph()
 
-    def decide_move(self, board_state):
-        board_tensor, _, _ = board_state
+    def _decide_move_for_player(self, board_tensor, player_mcts, player_states, player_probs):
         # Get the moves
         move_layer = chess_cpp.get_moves_for_player(board_tensor)
+        player_mcts.update_true_last_opponent_move()  # Potentially resets the graph if opponent did something different to our assumption.
+        player_mcts.init_top_node_if_empty_graph(board_tensor, move_layer)
+        start = time.time()
+        with torch.no_grad():
+            self.model.set_test_mode()
+            if torch.sum(move_layer) > 0:
+                player_mcts.generate_graph()  # The new way.
+                print(time.time() - start)
+                if self.training:
+                    player_states.append(player_mcts.top_node.current_board.clone().cpu())
+                    player_probs.append(player_mcts.top_node.get_probability_distribution().cpu())
+            self.model.set_train_mode()
+        if torch.sum(move_layer) > 0:
+            a2c_move, a2c_promotion = player_mcts.choose_move_and_update_graph(is_training=self.training)
+        else:
+            raise ValueError("No nodes to choose from.")
+        return a2c_move, a2c_promotion
+
+    def _inform_other_player_of_move(self, other_mcts, a2c_move):
+        actual_move = torch.squeeze(a2c_move, 0)
+        if other_mcts.top_node is not None:
+            other_mcts.top_node.set_opponent_actual_move(actual_move)
+
+    def decide_move(self, board_state):
+        board_tensor, _, _ = board_state
         # Choose a move
         if self.whites_move:
-            self.white_mcts.update_true_last_opponent_move()  # Potentially resets the graph if opponent did something different to our assumption.
-            self.white_mcts.init_top_node_if_empty_graph(board_tensor, move_layer)
-            start = time.time()
-            with torch.no_grad():
-                self.model.set_test_mode()
-                if torch.sum(move_layer) > 0:
-                    self.white_mcts.generate_graph()  # The new way.
-                    print(time.time() - start)
-                    if self.training:
-                        self.running_white_states.append(self.white_mcts.top_node.current_board.clone().cpu())
-                        self.running_white_prob.append(self.white_mcts.top_node.get_probability_distribution().cpu())
-                self.model.set_train_mode()
-            if torch.sum(move_layer) > 0:
-                a2c_move, a2c_promotion = self.white_mcts.choose_move_and_update_graph(is_training=self.training)
-            self.boards.update_batch_size(1)  # To be safe.
+            a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.white_mcts, self.running_white_states, self.running_white_prob)
+            self._inform_other_player_of_move(self.black_mcts, a2c_move)
             # Next to do 01/04/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
             # Fix memory leak - GPU usage creeps up as training goes on
-            # Do not reset the board when creating new nodes
-            # Change the way we train - run X full games, then learn move minibatches. Store board state, probability distributions and eventual game winner
-            # Use MCTS for black as well.
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
+            # Test games with white and black vs. Stockfish
         else:
-            #self.black_mcts.update_state(board_tensor)
-            a2c_move, a2c_promotion = get_random_move(board_tensor, move_layer)
-
-            actual_move = torch.squeeze(a2c_move, 0)
-            self.white_mcts.top_node.set_opponent_actual_move(actual_move)
-            #self.black_values_buffer.append((state.cpu(), game_value.cpu(), entropy.cpu(), log_prob.cpu()))
+            a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.black_mcts, self.running_black_states, self.running_black_prob)
+            self._inform_other_player_of_move(self.white_mcts, a2c_move)
+        self.boards.update_batch_size(1)  # To be safe.
         return (a2c_move, a2c_promotion)
-
-    def _get_my_rewards(self, game_over_tensor, opponent_move_layer):
-        rewards = torch.where(game_over_tensor[:,0], self.win_reward, self.move_reward).cpu()
-        if self.whites_move:
-            if game_over_tensor[:, 0]:
-                self.wins += 1
-            self.white_rewards_buffer.append(rewards)
-        else:
-            self.black_rewards_buffer.append(rewards)
-
-    def _update_opponent_rewards(self, game_over_tensor, opponent_move_layer):
-        if len(self.black_rewards_buffer) > 0:
-            losses_opp = game_over_tensor[:, 0]
-            if losses_opp:
-                if self.whites_move:
-                    self.black_rewards_buffer[-1] += self.lose_reward
-                else:
-                    self.losses += 1
-                    self.white_rewards_buffer[-1] += self.lose_reward
 
     def prepare_for_training(self):
         self.training = True
@@ -869,8 +844,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.model.load_models('train')
 
     def save_game_to_memory(self, true_game_value, game_num):
-        states_this_game = torch.cat(self.running_white_states, dim=0)
-        self.training_memory.add_to_memory(states_this_game, self.running_white_prob, true_game_value.cpu(), game_num)
+        w_states_this_game = torch.cat(self.running_white_states, dim=0)
+        b_states_this_game = torch.cat(self.running_black_states, dim=0)
+        self.training_memory.add_to_memory(w_states_this_game, self.running_white_prob, true_game_value.cpu(), game_num)
+        self.training_memory.add_to_memory(b_states_this_game, self.running_black_prob, -true_game_value.cpu(), game_num)
 
     def train_step(self, epoch):
         states, mcts_probs, game_vals = self.training_memory.sample_training_batch()
@@ -884,7 +861,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
     def log_stockfish_move(self, move, board_state, starting_colour_me):
         jle_move, jle_promotion = convert_UCI_to_jle_notation(move, starting_colour_me)
         actual_move = torch.squeeze(jle_move, 0)
-        self.white_mcts.top_node.set_opponent_actual_move(actual_move)
+        if self.whites_move:  # TODO - test with Stockfish
+            self.white_mcts.top_node.set_opponent_actual_move(actual_move)
+        else:
+            self.black_mcts.top_node.set_opponent_actual_move(actual_move)
         return super().log_stockfish_move(move, board_state, starting_colour_me)
 
     def self_play_and_training_session(self, boards, start_epoch):
@@ -918,7 +898,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 states.append(batched_board.clone())
                 moves.append(move)
                 promotions.append(promotion)
-                self.apply_all_rewards(game_over_tensor, (batched_board, opponent_move_layer))
                 game_over = torch.any(game_over_tensor, dim=1)
                 self.whites_move = not self.whites_move
                 episode_length += 1
@@ -938,7 +917,9 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 self.save_game_to_memory(true_game_value, num_logged_games)
                 num_logged_games += 1
                 if num_logged_games % train_cadence == 0:
+                    self.prepare_for_training()
                     current_epoch = self.train_on_data(current_epoch)
+                    self.prepare_for_evaluation()
             else:
                 self.model.optimiser.zero_grad()
             save_full_game_artifacts(self.artifacts_dir, total_games + 1, states, moves, promotions)
@@ -962,13 +943,6 @@ class RandomMoveAgent(JLEAIMoveAgent):
     @conditional_compile
     def decide_and_enact_move(self, board_state):
         return super().decide_and_enact_move(board_state)
-    
-    def _get_my_rewards(self, game_over_tensor, game_state_bundle):
-        rewards = torch.where(game_over_tensor[:,0], 100, -1)
-        return rewards
-    
-    def _update_opponent_rewards(self, game_over_tensor, game_state_bundle):
-        pass
     
     def prepare_for_training(self):
         pass
