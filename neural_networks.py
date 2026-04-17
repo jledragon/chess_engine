@@ -417,6 +417,7 @@ class A2CChessNetwork:
     
     @conditional_compile
     def get_mcts_moves(self, current_board, out_move, out_prom, move_layer):
+        assert current_board.shape[1] == 8, "Remember to use the full board here."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
         num_moves_per_batch_element = torch.sum(ml_mask, axis=1)
         move_logits = self.get_move_logits(out_move, ml_mask)

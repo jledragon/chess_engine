@@ -201,7 +201,8 @@ class TestExpandingMoves(unittest.TestCase):
         legal_moves = torch.where(flat_moves == 1)[0].unsqueeze(1)
         valid_moves = torch.ones((6)).cuda() / 6
         prom = torch.Tensor([1, 0, 0, 0]).to(torch.float32).cuda()
-        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(batched_board[0], prom, legal_moves, valid_moves)
+        num_moves_per_batch_element = [6]
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(batched_board, prom, legal_moves, valid_moves, num_moves_per_batch_element)
         assert torch.equal(expanded_promotions, torch.Tensor([
             [0, 0, 0, 1],
             [0, 0, 0, 1],

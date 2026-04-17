@@ -859,7 +859,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Fix memory leak - GPU usage creeps up as training goes on
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
-            # Use both threads and blocks in promotion ops. Also fix promotion ops
+            # Fix the bug around promotions - we're getting promotions in cases where there are no pawns
             # Experiment with multithreading
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.black_mcts, self.running_black_states, self.running_black_prob)
