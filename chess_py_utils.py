@@ -273,7 +273,27 @@ def expand_valid_probs(single_board, valid_probs, is_promotion, val_prom):
     return filtered_probs
 
 @conditional_compile
-def expand_all_moves(single_board, val_prom, legal_moves, valid_probs):
+def expand_all_boards(all_boards, num_moves_per_batch_element):
+    all_expanded_boards = []
+    for board_i in range(all_boards.shape[0]):
+        # This is the part that needs to work with single elements,
+        # as `num_moves_per_batch_element` is different per index.
+        all_expanded_boards.append(all_boards[board_i].unsqueeze(0).repeat(num_moves_per_batch_element[board_i], 1, 1, 1))
+    all_expanded_boards = torch.cat(all_expanded_boards, axis=0)
+    return all_expanded_boards
+
+@conditional_compile
+def get_new_batch_splits(is_promotion, num_moves_per_batch_element):
+    total = 0
+    splits = []
+    for b_num in num_moves_per_batch_element:
+        is_prom_slice = is_promotion[total:total+b_num]
+        total += b_num
+        splits.append(b_num + torch.unsqueeze(torch.sum(is_prom_slice), 0))
+    return torch.cat(splits).to(torch.int32).cuda()
+
+@conditional_compile
+def expand_all_moves(all_boards, val_prom, legal_moves, valid_probs, num_moves_per_batch_element):
     ft1 = legal_moves // 64
     ft2 = legal_moves % 64
     f1 = ft1 // 8
@@ -281,15 +301,36 @@ def expand_all_moves(single_board, val_prom, legal_moves, valid_probs):
     f2 = ft2 // 8
     t2 = ft2 % 8
     all_possible_moves = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
-    copied_boards = single_board.repeat(all_possible_moves.shape[0], 1, 1, 1)
-    is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards, all_possible_moves)
-    default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(all_possible_moves.shape[0], 1).to(torch.int8).cuda()
-    expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
-    expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
-    expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
+    copied_boards = expand_all_boards(all_boards, num_moves_per_batch_element)
+
+    all_expanded_boards = []
+    all_expanded_moves = []
+    all_expanded_promotions = []
+    all_is_promotion = []
+    # Batch, for safety. 1024 hard coded for now.
+    batch_size = 1024
+    for ind_ in range(0, copied_boards.shape[0], batch_size):
+        is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards[ind_:ind_+batch_size], all_possible_moves[ind_:ind_+batch_size])
+        default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(is_promotion.shape[0], 1).to(torch.int8).cuda()
+        expanded_boards = chess_cpp.expand_boards(copied_boards[ind_:ind_+batch_size], is_promotion)
+        expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
+        expanded_moves = chess_cpp.expand_moves(all_possible_moves[ind_:ind_+batch_size], is_promotion)
+        all_expanded_boards.append(expanded_boards)
+        all_expanded_moves.append(expanded_moves)
+        all_expanded_promotions.append(expanded_promotions)
+        all_is_promotion.append(is_promotion)
+    all_expanded_boards = torch.cat(all_expanded_boards, dim=0)
+    all_expanded_moves = torch.cat(all_expanded_moves, dim=0)
+    all_expanded_promotions = torch.cat(all_expanded_promotions, dim=0)
+    all_is_promotion = torch.cat(all_is_promotion, dim=0)
+
+    new_splits = get_new_batch_splits(all_is_promotion, num_moves_per_batch_element)
     # Keep gradients here
-    expanded_valid_probs = expand_valid_probs(single_board, valid_probs, is_promotion, val_prom)
-    return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs
+    if torch.sum(all_is_promotion) > 0:
+        # This appears to be broken. Get to the bottom of why - unit test, perhaps
+        print(torch.sum(all_is_promotion), "!!!", copied_boards.shape)
+    expanded_valid_probs = expand_valid_probs(all_boards, valid_probs, all_is_promotion, val_prom)
+    return all_expanded_boards, all_expanded_moves, all_expanded_promotions, expanded_valid_probs, new_splits
 
 def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
     assert len(move) == 1  # Only do this in Python for a single batch.

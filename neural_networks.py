@@ -417,16 +417,26 @@ class A2CChessNetwork:
     
     @conditional_compile
     def get_mcts_moves(self, current_board, out_move, out_prom, move_layer):
-        assert (move_layer.shape[0] == 1 and current_board.shape[0] == 1), "Must play with using single scenario in simulation mode."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
+        num_moves_per_batch_element = torch.sum(ml_mask, axis=1)
         move_logits = self.get_move_logits(out_move, ml_mask)
         move_probs = self.softmax(move_logits)
         valid_move_indices = torch.argwhere(move_probs)[:,1:]
         valid_probs = move_probs[ml_mask]
         valid_promotion_probs_per_move = out_prom[ml_mask]
         val_prom = self.softmax(valid_promotion_probs_per_move)
-        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs)
-        return expanded_moves, expanded_promotions, expanded_valid_probs
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs, num_moves_per_batch_element)
+        all_expanded_moves = []
+        all_expanded_promotions = []
+        all_expanded_valid_probs = []
+        total = 0
+        # Return on a per-node basis.
+        for split in new_splits:
+            all_expanded_moves.append(expanded_moves[total:total+split])
+            all_expanded_promotions.append(expanded_promotions[total:total+split])
+            all_expanded_valid_probs.append(expanded_valid_probs[total:total+split])
+            total += split
+        return all_expanded_moves, all_expanded_promotions, all_expanded_valid_probs
     
     @conditional_compile
     def get_best_opponent_move(self, board, move_layer):
@@ -450,9 +460,9 @@ class A2CChessNetwork:
         pred_act, pred_prom, pred_value = self.get_model_move_and_state(state[:,:6,:,:])
         move_layer = chess_cpp.get_moves_for_player(state)
         cross_entropy_total = 0
-        for b_ind in range(state.shape[0]):
-            _, _, action_probs = self.get_mcts_moves(state[b_ind:b_ind+1,:,:,:], pred_act[b_ind:b_ind+1,:], pred_prom[b_ind:b_ind+1,:,:], move_layer[b_ind:b_ind+1,:,:])
-            cross_entropy_total = cross_entropy_total + F.cross_entropy(action_probs, graph_probs[b_ind])
+        _, _, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
+        for i, ap in enumerate(action_probs):
+            cross_entropy_total = cross_entropy_total + F.cross_entropy(ap, graph_probs[i])
         cross_entropy_mean = cross_entropy_total / state.shape[0]
         reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
         combined_loss = cross_entropy_mean + 2 * reward_loss

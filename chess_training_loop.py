@@ -451,11 +451,14 @@ class MCTSNode:
         self.marked_for_generation = False  # An attempt to make graph generation faster.
         self.action_probs_with_grad = None
         self.state_value = None  # Information about predicted value or better - may be GT terminal
+        self.marked_for_rollout = False
     
-    def update_actions_and_values(self, valid_actions, valid_promotions, action_probs, state_value, predicted_value):
+    def update_actions(self, valid_actions, valid_promotions, action_probs):
         self.P = action_probs
         self.valid_actions = valid_actions
         self.valid_promotions = valid_promotions
+
+    def update_values(self, state_value, predicted_value):
         self.state_value = state_value
         self.predicted_value = predicted_value
     
@@ -508,7 +511,7 @@ class MCTSGraph:
         if self.top_node is None:
             not_terminal = torch.zeros((3)).to(torch.bool).cuda()  # No win, no loss, no draw
             self.top_node = MCTSNode(current_board, moves_for_state, not_terminal)
-    
+
             # Special - only do this for the first move of the game.
             self.top_node.rollout_done = True
             if torch.sum(moves_for_state) > 0:
@@ -517,21 +520,37 @@ class MCTSGraph:
                 self.top_node.add_predictions(None, None, state_value, None)  # No opponent move led us here.
                 valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(current_board, model_moves, model_proms, moves_for_state)
                 predicted_value = state_value.squeeze(0)
-                self.top_node.update_actions_and_values(valid_actions, valid_promotions, action_probs, predicted_value, predicted_value)
+                self.top_node.update_actions(valid_actions[0], valid_promotions[0], action_probs[0])
+                self.top_node.update_values(predicted_value, predicted_value)
     
     @conditional_compile
-    def rollout(self, node):
+    def rollout(self, nodes):
         # "Rollout" compared to traditional MCTS means predicts the value from the model, unless the ground truth terminal gives better information.
-        node.rollout_done = True
-        # Possible no grad here.
-        moves_for_state = node.moves_for_state
-        valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(node.current_board, node.model_move, node.model_promotion, moves_for_state)
-        
+        all_boards = []
+        all_moves = []
+        all_model_proms = []
+        all_moves_for_state = []
+        for node in nodes:
+            all_boards.append(node.current_board)
+            all_moves.append(node.model_move)
+            all_model_proms.append(node.model_promotion)
+            all_moves_for_state.append(node.moves_for_state)
+        all_boards = torch.cat(all_boards, dim=0)
+        all_moves = torch.cat(all_moves, dim=0)
+        all_model_proms = torch.cat(all_model_proms, dim=0)
+        all_moves_for_state = torch.cat(all_moves_for_state, dim=0)
+        valid_actions, valid_promotions, action_probs = self.model.get_mcts_moves(all_boards, all_moves, all_model_proms, all_moves_for_state)
+        for ni, node in enumerate(nodes):
+            node.update_actions(valid_actions[ni], valid_promotions[ni], action_probs[ni])
+            node.rollout_done = True
+
+    @conditional_compile
+    def add_state_value(self, node):
         # Deal with the current state's value.
         state_value = self.value_mask[node.terminal_status]
         state_value = node.pred_value if state_value.shape[0] == 0 else state_value
         assert not state_value.shape[0] > 1, f"Error - node end state had more than one outcome. Terminal status for node: {node.terminal_status}"
-        node.update_actions_and_values(valid_actions, valid_promotions, action_probs, state_value, node.pred_value)
+        node.update_values(state_value, node.pred_value)
 
     @conditional_compile
     def batched_child_move(self, index_boards, index_actions, index_promotions, index_colour_list):
@@ -632,15 +651,15 @@ class MCTSGraph:
     
     @conditional_compile
     def get_max_ucbi_index(self, values_tensor):
-        ucbi_tensor = torch.where(
-            values_tensor[:,2] == 0,
-            float('inf'),
-            values_tensor[:,0] + torch.sqrt(torch.log(values_tensor[:,1]) / values_tensor[:,2])
-        )
+        # UCB1
+        ucbi_tensor = values_tensor[:,0] + 2 * torch.sqrt(torch.log(values_tensor[:,1]) / values_tensor[:,2])
         max_index = torch.argmax(ucbi_tensor)
         return max_index        
     
     def get_max_ucbi_node(self, current_state):
+        for child in current_state.children:
+            if child.N == 0:  # Shortcut - speeds things up slightly.
+                return child
         values_tensor = torch.tensor([[child.Q, current_state.N, child.N] for child in current_state.children]).cuda()
         max_index = self.get_max_ucbi_index(values_tensor)
         return current_state.children[max_index]
@@ -650,6 +669,7 @@ class MCTSGraph:
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
         self.boards.update_batch_size(self.batch_size)
         nodes_marked_for_generation = []
+        nodes_marked_for_rollout = []
         for _ in range(0, self.depth):
             current_state = self.top_node
             # Find the next node to roll out and then do so.
@@ -657,6 +677,13 @@ class MCTSGraph:
             while not current_state.is_leaf:
                 # Generate children for multiple nodes at once to minimise the number of separate GPU calls
                 if current_state.marked_for_generation:
+                    # Rollout for multiple nodes at once to minimise the number of separate GPU calls
+                    if current_state != self.top_node:  # Check if top node can also be rolled out here
+                        for n in nodes_marked_for_rollout:
+                            n.marked_for_rollout = False
+                        self.rollout(nodes_marked_for_rollout)
+                        nodes_marked_for_rollout.clear()
+
                     for generation_node in nodes_marked_for_generation:
                         generation_node.marked_for_generation = False
                     self.generate_children(nodes_marked_for_generation)
@@ -664,15 +691,20 @@ class MCTSGraph:
 
                 current_state = self.get_max_ucbi_node(current_state)
                 backup_states.append(current_state)
-            if not current_state.rollout_done:
-                self.rollout(current_state)
+
+            # Mark any eligible states for rollout
+            if not current_state.rollout_done and not current_state.marked_for_rollout:
+                nodes_marked_for_rollout.append(current_state)
+                self.add_state_value(current_state)
+                current_state.marked_for_rollout = True
             game_over = torch.any(current_state.terminal_status)  # Most probably a win if so.
+
             # If we have found a best "winning" state, keep on going to increase its N value.
             if current_state.N >= 1 and not game_over:
-                #self.generate_children(current_state)
                 current_state.marked_for_generation = True
                 self.fake_generate_children(current_state)
                 nodes_marked_for_generation.append(current_state)
+
             # Backpropagate
             value = current_state.state_value
             for back_state in backup_states:
@@ -680,7 +712,11 @@ class MCTSGraph:
                 back_state.W = back_state.W + value
                 back_state.Q = back_state.W / back_state.N
 
-        # Clean up before this array goes out of scope.
+        # Clean up before these arrays go out of scope.
+        for rollout_node in nodes_marked_for_rollout:
+            rollout_node.marked_for_rollout = False
+        self.rollout(nodes_marked_for_rollout)
+        nodes_marked_for_rollout.clear()
         for generation_node in nodes_marked_for_generation:
             generation_node.marked_for_generation = False
         self.generate_children(nodes_marked_for_generation)
@@ -817,12 +853,14 @@ class A2CMoveAgent(JLEAIMoveAgent):
         if self.whites_move:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.white_mcts, self.running_white_states, self.running_white_prob)
             self._inform_other_player_of_move(self.black_mcts, a2c_move)
-            # Next to do 01/04/2026:
+            # Next to do 17/04/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
             # Fix memory leak - GPU usage creeps up as training goes on
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
+            # Use both threads and blocks in promotion ops. Also fix promotion ops
+            # Experiment with multithreading
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.black_mcts, self.running_black_states, self.running_black_prob)
             self._inform_other_player_of_move(self.white_mcts, a2c_move)
