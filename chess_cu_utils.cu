@@ -1138,7 +1138,7 @@ void getMoves(torch::Tensor board, torch::Tensor moveLayer, const int batch_size
     
     // From here, I will need to test for check and then get moves.
 
-    AT_DISPATCH_INTEGRAL_TYPES(board.type(), "getMoves_cu_", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(board.scalar_type(), "getMoves_cu_", ([&] {
         getMoves_cu<scalar_t><<<numberOfBlocks, threadsPerBlock>>>(
             board.data<scalar_t>(),
             moveLayer.data<scalar_t>(),
@@ -1168,7 +1168,7 @@ void getMovesWithSkip(torch::Tensor board, torch::Tensor moveLayer, const int ba
     
     // From here, I will need to test for check and then get moves.
 
-    AT_DISPATCH_INTEGRAL_TYPES(board.type(), "getMovesWithSkip_cu_", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(board.scalar_type(), "getMovesWithSkip_cu_", ([&] {
         getMovesWithSkip_cu<scalar_t><<<numberOfBlocks, threadsPerBlock>>>(
             board.data<scalar_t>(),
             notSkip.data<bool>(),
@@ -1191,7 +1191,7 @@ void getStalemates(torch::Tensor board, torch::Tensor gameOverList, torch::Tenso
     size_t threadsPerBlock = boardSize * boardSize;
     size_t numberOfBlocks = batch_size;
 
-    AT_DISPATCH_INTEGRAL_TYPES(board.type(), "getStalemates_cu_", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(board.scalar_type(), "getStalemates_cu_", ([&] {
         getStalemates_cu_<scalar_t><<<numberOfBlocks, threadsPerBlock>>>(
             board.data<scalar_t>(),
             gameOverList.data<bool>(),
@@ -1209,7 +1209,7 @@ void getSquaresInCheck(torch::Tensor board, torch::Tensor checkList, const int b
     size_t threadsPerBlock = boardSize * boardSize;
     size_t numberOfBlocks = batch_size;
 
-    AT_DISPATCH_INTEGRAL_TYPES(board.type(), "getSquaresInCheck_cu_", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(board.scalar_type(), "getSquaresInCheck_cu_", ([&] {
         // This kernel needs to be the same as the one above so that getSquaresInCheck is run under the same conditions as in getMoves.
         getSquaresInCheck_cu<scalar_t><<<numberOfBlocks, threadsPerBlock>>>(
             board.data<scalar_t>(),
@@ -1233,7 +1233,7 @@ void getValidBlockingSquares(torch::Tensor board, torch::Tensor blockList, const
     cudaMallocManaged(&everythingAllowed, batch_size * (boardSize * boardSize) * (boardSize * boardSize));
     cudaMallocManaged(&validBlockingSquares, batch_size * (boardSize * boardSize) * (boardSize * boardSize));
 
-    AT_DISPATCH_INTEGRAL_TYPES(board.type(), "getBlockSquares_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(board.scalar_type(), "getBlockSquares_cu", ([&] {
         // This kernel needs to be the same as the one above so that getBlockSquares is run under the same conditions as in getMoves.
         getBlockSquares_cu<scalar_t><<<numberOfBlocks, threadsPerBlock>>>(
             board.data<scalar_t>(),
@@ -1255,7 +1255,7 @@ void getValidBlockingSquares(torch::Tensor board, torch::Tensor blockList, const
 void selectRandomMoves(torch::Tensor moves, torch::Tensor randomMove, torch::Tensor selectedMoves, const int batch_size, const int boardSize) {
     size_t numberOfBlocks = batch_size;
     
-    AT_DISPATCH_INTEGRAL_TYPES(randomMove.type(), "selectRandomMoves_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(randomMove.scalar_type(), "selectRandomMoves_cu", ([&] {
         selectRandomMoves_cu<scalar_t><<<numberOfBlocks, 1>>>(
             moves.data<scalar_t>(),
             randomMove.data<scalar_t>(),
@@ -1270,7 +1270,7 @@ void selectRandomMoves(torch::Tensor moves, torch::Tensor randomMove, torch::Ten
 void enactMoves(torch::Tensor board, torch::Tensor selectedMoves, torch::Tensor pawnPromotions, torch::Tensor moveCount, const int batch_size, const int boardSize, const int encodingSize) {
     size_t numberOfBlocks = batch_size;
     
-    AT_DISPATCH_INTEGRAL_TYPES(board.type(), "enactMoves_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(board.scalar_type(), "enactMoves_cu", ([&] {
         enactMoves_cu<scalar_t><<<numberOfBlocks, 1>>>(
             board.data<scalar_t>(),
             selectedMoves.data<scalar_t>(),
@@ -1288,7 +1288,7 @@ void getWherePromotion(torch::Tensor all_boards, torch::Tensor move_per_board, t
     size_t numberOfBlocks = 256;
     size_t numberOfThreads = 256;
 
-    AT_DISPATCH_INTEGRAL_TYPES(move_per_board.type(), "getWherePromotion_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(move_per_board.scalar_type(), "getWherePromotion_cu", ([&] {
         getWherePromotion_cu<scalar_t><<<numberOfBlocks, numberOfThreads>>>(
             all_boards.data<scalar_t>(),
             move_per_board.data<scalar_t>(),
@@ -1306,7 +1306,7 @@ void expandPromotions(torch::Tensor promotion_per_board, torch::Tensor newPromot
     size_t numberOfBlocks = 256;
     size_t numberOfThreads = 256;
 
-    AT_DISPATCH_INTEGRAL_TYPES(promotion_per_board.type(), "expandPromotions_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(promotion_per_board.scalar_type(), "expandPromotions_cu", ([&] {
         expandPromotions_cu<scalar_t><<<numberOfBlocks, numberOfThreads>>>(
             promotion_per_board.data<scalar_t>(),
             newPromotions.data<scalar_t>(),
@@ -1322,7 +1322,7 @@ void expandMoves(torch::Tensor moves_per_board, torch::Tensor newMoves, torch::T
     size_t numberOfBlocks = 256;
     size_t numberOfThreads = 256;
 
-    AT_DISPATCH_INTEGRAL_TYPES(moves_per_board.type(), "expandMoves_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(moves_per_board.scalar_type(), "expandMoves_cu", ([&] {
         expandMoves_cu<scalar_t><<<numberOfBlocks, numberOfThreads>>>(
             moves_per_board.data<scalar_t>(),
             newMoves.data<scalar_t>(),
@@ -1338,7 +1338,7 @@ void expandBoards(torch::Tensor all_boards, torch::Tensor newBoards, torch::Tens
     size_t numberOfBlocks = 256;
     size_t numberOfThreads = 256;
 
-    AT_DISPATCH_INTEGRAL_TYPES(all_boards.type(), "expandBoards_cu", ([&] {
+    AT_DISPATCH_INTEGRAL_TYPES(all_boards.scalar_type(), "expandBoards_cu", ([&] {
         expandBoards_cu<scalar_t><<<numberOfBlocks, numberOfThreads>>>(
             all_boards.data<scalar_t>(),
             newBoards.data<scalar_t>(),
@@ -1356,7 +1356,7 @@ void expandValidProbs(torch::Tensor valid_probs, torch::Tensor newValidProbs, to
     size_t numberOfBlocks = 256;
     size_t numberOfThreads = 256;
 
-    AT_DISPATCH_ALL_TYPES(valid_probs.type(), "expandValidProbs_cu", ([&] {
+    AT_DISPATCH_ALL_TYPES(valid_probs.scalar_type(), "expandValidProbs_cu", ([&] {
         expandValidProbs_cu<float><<<numberOfBlocks, numberOfThreads>>>(
             valid_probs.data<float>(),
             newValidProbs.data<float>(),

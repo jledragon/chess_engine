@@ -1,0 +1,6 @@
+torch
+torchvision
+stockfish
+bidict
+einops
+blitz-bayesian-pytorch

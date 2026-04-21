@@ -506,7 +506,7 @@ class MCTSGraph:
     def reset_graph(self):
         self.top_node = None
     
-    @conditional_compile
+    #@conditional_compile
     def init_top_node_if_empty_graph(self, current_board, moves_for_state):
         if self.top_node is None:
             not_terminal = torch.zeros((3)).to(torch.bool).cuda()  # No win, no loss, no draw
@@ -523,7 +523,7 @@ class MCTSGraph:
                 self.top_node.update_actions(valid_actions[0], valid_promotions[0], action_probs[0])
                 self.top_node.update_values(predicted_value, predicted_value)
     
-    @conditional_compile
+    #@conditional_compile
     def rollout(self, nodes):
         # "Rollout" compared to traditional MCTS means predicts the value from the model, unless the ground truth terminal gives better information.
         if len(nodes) == 0:
@@ -546,7 +546,7 @@ class MCTSGraph:
             node.update_actions(valid_actions[ni], valid_promotions[ni], action_probs[ni])
             node.rollout_done = True
 
-    @conditional_compile
+    #@conditional_compile
     def add_state_value(self, node):
         # Deal with the current state's value.
         state_value = self.value_mask[node.terminal_status]
@@ -554,7 +554,7 @@ class MCTSGraph:
         assert not state_value.shape[0] > 1, f"Error - node end state had more than one outcome. Terminal status for node: {node.terminal_status}"
         node.update_values(state_value, node.pred_value)
 
-    @conditional_compile
+    #@conditional_compile
     def batched_child_move(self, index_boards, index_actions, index_promotions, index_colour_list):
         (_, _), (_, board_tensor_half, index_colour_list, opponent_move_layer, game_over_tensor_1) = \
             self.agent.enact_move((index_actions, index_promotions), (index_boards, index_colour_list, None), full_game_over_conditions=False)
