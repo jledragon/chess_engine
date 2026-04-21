@@ -294,6 +294,7 @@ def get_new_batch_splits(is_promotion, num_moves_per_batch_element):
 
 @conditional_compile
 def expand_all_moves(all_boards, val_prom, legal_moves, valid_probs, num_moves_per_batch_element):
+    assert all_boards.shape[1] == 8, "Remember to use the full board here."
     ft1 = legal_moves // 64
     ft2 = legal_moves % 64
     f1 = ft1 // 8
@@ -310,9 +311,6 @@ def expand_all_moves(all_boards, val_prom, legal_moves, valid_probs, num_moves_p
     expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
     new_splits = get_new_batch_splits(is_promotion, num_moves_per_batch_element)
     # Keep gradients here
-    if torch.sum(is_promotion) > 0:
-        # This appears to be broken. Get to the bottom of why - unit test, perhaps
-        print(torch.sum(is_promotion), "!!!", copied_boards.shape)
     expanded_valid_probs = expand_valid_probs(all_boards, valid_probs, is_promotion, val_prom)
     return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits
 

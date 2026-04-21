@@ -393,7 +393,7 @@ class A2CChessNetwork:
         self.lr = self.chess_network.lr  # All use the same class, so all lr should be the same.
         self.optimiser = SharedAdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
         self.optimiser.share_memory()
-        self.softmax = nn.Softmax(dim=1)
+        self.softmax = nn.Softmax(dim=1)  # Likely deprecated - always use log.
         self.log_softmax = nn.LogSoftmax(dim=1)
         self.train_mode = True
         self.gamma = 0.99
@@ -402,9 +402,9 @@ class A2CChessNetwork:
         self.value_loss_coef = 2.0
 
     @conditional_compile
-    def get_move_logits(self, out_move, move_layer):
+    def get_move_logits(self, out_move, ml_mask):
         filtered_out = torch.where(
-            move_layer,
+            ml_mask,
             out_move,
             -float('inf'),
         )
@@ -419,13 +419,15 @@ class A2CChessNetwork:
     def get_mcts_moves(self, current_board, out_move, out_prom, move_layer):
         assert current_board.shape[1] == 8, "Remember to use the full board here."
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
-        num_moves_per_batch_element = torch.sum(ml_mask, axis=1)
+        num_moves_per_batch_element = torch.sum(move_layer, dim=(1,2), dtype=torch.int32)
         move_logits = self.get_move_logits(out_move, ml_mask)
-        move_probs = self.softmax(move_logits)
-        valid_move_indices = torch.argwhere(move_probs)[:,1:]
-        valid_probs = move_probs[ml_mask]
+        log_move_probs = self.log_softmax(move_logits)
+        finite_log_probs = torch.isfinite(log_move_probs)
+        valid_move_indices = torch.argwhere(finite_log_probs)[:,1:]
+        valid_probs = torch.exp(log_move_probs[ml_mask])
         valid_promotion_probs_per_move = out_prom[ml_mask]
-        val_prom = self.softmax(valid_promotion_probs_per_move)
+        log_val_prom = self.log_softmax(valid_promotion_probs_per_move)
+        val_prom = torch.isfinite(log_val_prom)
         expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs, num_moves_per_batch_element)
         all_expanded_moves = []
         all_expanded_promotions = []
@@ -446,7 +448,7 @@ class A2CChessNetwork:
         out_prom = out_prom.to(torch.int8)
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
         move_logits = self.get_move_logits(out_move, ml_mask)
-        move_probs = self.softmax(move_logits)
+        move_probs = self.log_softmax(move_logits)
         action = torch.argmax(move_probs, dim=1, keepdim=True)
         ft1 = action // 64
         ft2 = action % 64

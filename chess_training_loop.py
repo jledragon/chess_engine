@@ -526,6 +526,8 @@ class MCTSGraph:
     @conditional_compile
     def rollout(self, nodes):
         # "Rollout" compared to traditional MCTS means predicts the value from the model, unless the ground truth terminal gives better information.
+        if len(nodes) == 0:
+            return
         all_boards = []
         all_moves = []
         all_model_proms = []
@@ -859,7 +861,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Fix memory leak - GPU usage creeps up as training goes on
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
-            # Fix the bug around promotions - we're getting promotions in cases where there are no pawns
             # Experiment with multithreading
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.black_mcts, self.running_black_states, self.running_black_prob)
@@ -955,9 +956,9 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 self.save_game_to_memory(true_game_value, num_logged_games)
                 num_logged_games += 1
                 if num_logged_games % train_cadence == 0:
-                    self.prepare_for_training()
+                    self.model.set_train_mode()
                     current_epoch = self.train_on_data(current_epoch)
-                    self.prepare_for_evaluation()
+                    self.model.set_test_mode()
             else:
                 self.model.optimiser.zero_grad()
             save_full_game_artifacts(self.artifacts_dir, total_games + 1, states, moves, promotions)
