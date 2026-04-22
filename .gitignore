@@ -10,3 +10,4 @@ cuda-repo-wsl-ubuntu-12-4-local_12.4.0-1_amd64.deb
 stockfish-ubuntu-x86-64-avx2.tar
 stockfish-windows-x86-64-avx2/
 stockfish/
+models/

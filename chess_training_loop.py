@@ -809,7 +809,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.artifacts_dir = Path('.') / artifacts_dir / now_str
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.training_memory = A2CGameMemory(10_000, 256)
-        self.num_epochs_to_train = 100
+        self.num_iter_delta = 100
+        self.num_iters_to_train = 100
 
     def end_episode(self):
         self.whites_move = True
@@ -893,18 +894,26 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.model.update_network(states, mcts_probs, game_vals)
 
     def train_on_data(self, start_epoch):
-        for current_epoch in range(start_epoch, start_epoch + self.num_epochs_to_train):
+        print(f"Training for {self.num_iters_to_train} iterations...")
+        for current_epoch in range(start_epoch, start_epoch + self.num_iters_to_train):
             self.train_step(current_epoch)
         return current_epoch
-    
-    def log_stockfish_move(self, move, board_state, starting_colour_me):
-        jle_move, jle_promotion = convert_UCI_to_jle_notation(move, starting_colour_me)
-        actual_move = torch.squeeze(jle_move, 0)
-        if self.whites_move:  # TODO - test with Stockfish
+
+    def update_training_params(self, num_logged_games):
+        self.num_iters_to_train += self.num_iter_delta
+
+    def log_opponent_move(self, move, promotion, board_state):
+        # A generic component of log_stockfish_move
+        actual_move = torch.squeeze(move, 0)
+        if self.whites_move:
             self.white_mcts.top_node.set_opponent_actual_move(actual_move)
         else:
             self.black_mcts.top_node.set_opponent_actual_move(actual_move)
-        return super().log_stockfish_move(move, board_state, starting_colour_me)
+
+    def log_stockfish_move(self, move, board_state, starting_colour_me):
+        jle_move, jle_promotion = convert_UCI_to_jle_notation(move, starting_colour_me)
+        self.log_opponent_move(jle_move, jle_promotion, board_state)
+        return self.enact_move((jle_move, jle_promotion), board_state)
 
     def self_play_and_training_session(self, boards, start_epoch):
         """
@@ -958,6 +967,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 if num_logged_games % train_cadence == 0:
                     self.model.set_train_mode()
                     current_epoch = self.train_on_data(current_epoch)
+                    self.update_training_params(num_logged_games)
                     self.model.set_test_mode()
             else:
                 self.model.optimiser.zero_grad()
@@ -1019,14 +1029,14 @@ def evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent):
     """
     boards.update_batch_size(1)
 
-    stockfish_agent.set_elo(0)
+    stockfish_agent.set_elo(0)  # Min ELO is now 1,320!!
     for i in range(0, 20):
         stockfish_agent.start_new_game()
         dud_move_count = boards.get_starting_move_count_list()
         colour_list = torch.ones((1)).to(torch.bool).cuda()
         single_board = boards.to_tensor().cuda()
         winner = ''
-        if random() > 0.0:  # 0.5
+        if random() > 0.5:  # 0.5
             # Play white.
             starting_colour = True
             (randomly_selected_move, random_promotion), (dud_move_count, single_board, colour_list, _, game_over_tensor) = \
@@ -1064,10 +1074,77 @@ def evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent):
     boards.update_batch_size(BATCH_SIZE)
 
 
-@conditional_compile
-def evaluate_against_random(boards, random_agent, our_ai_agent):
+def evaluate_a2c_against_random(boards, random_agent, our_ai_agent):
     """
-    Play an AI against random, to test whether a new training algorithm is working.
+    Evaluate an A2C AI against random, to test whether training is working.
+    """
+    boards.update_batch_size(1)
+
+    for i in range(0, 20):
+        dud_move_count = boards.get_starting_move_count_list()
+        colour_list = torch.ones((1)).to(torch.bool).cuda()
+        single_board = boards.to_tensor().cuda()
+        winner = ''
+        episode_length = 0
+        our_ai_agent.start_episode()
+        inform_about_opponent_move = True  # When we play black, do not inform about the first move white takes.
+        # This is due to starting the graph at our first playable move, which will not be the usual chess starting state.
+        #col = False
+        if random() > 0.5:  # 0.5
+            # Play white.
+            #col = True
+            (move, promotion), (dud_move_count, single_board, colour_list, _, game_over_tensor) = \
+                our_ai_agent.decide_and_enact_move((single_board, colour_list, dud_move_count))
+            episode_length += 1
+        else:
+            our_ai_agent.whites_move = False
+            inform_about_opponent_move = False
+        while True:
+            #col = not col
+            (move, promotion), (dud_move_count, single_board, colour_list, _, game_over_tensor) = \
+                random_agent.decide_and_enact_move((single_board, colour_list, dud_move_count))
+            if inform_about_opponent_move:
+                our_ai_agent.log_opponent_move(move, promotion, (single_board, colour_list, dud_move_count))
+            else:
+                inform_about_opponent_move = True
+            episode_length += 1
+            if episode_length >= our_ai_agent.max_episode_length:
+                winner = 'no winner. The game went on too long.'
+                break
+
+            if torch.any(game_over_tensor):
+                if game_over_tensor[0][0]:
+                    winner = 'Random'
+                else:
+                    winner = 'Draw'
+                break
+
+            #col = not col
+            (move, promotion), (dud_move_count, single_board, colour_list, _, game_over_tensor) = \
+                our_ai_agent.decide_and_enact_move((single_board, colour_list, dud_move_count))
+            episode_length += 1
+            if episode_length >= our_ai_agent.max_episode_length:
+                winner = 'no winner. The game went on too long.'
+                break
+
+            if torch.any(game_over_tensor):
+                if game_over_tensor[0][0]:
+                    winner = 'JLE'
+                else:
+                    winner = 'Draw'
+                break
+
+        single_board, colour_list, dud_move_count = our_ai_agent.reset_all((single_board, colour_list, dud_move_count))
+        our_ai_agent.end_episode()
+        print(f"I did a whole game - The winner was {winner}")
+
+    boards.update_batch_size(BATCH_SIZE)
+
+
+@conditional_compile
+def evaluate_dqn_against_random(boards, random_agent, our_ai_agent):
+    """
+    Play an DQN AI against random, to test whether a new training algorithm is working.
     """
     boards.update_batch_size(256)
     batched_board = boards.to_tensor().cuda()
@@ -1125,7 +1202,7 @@ if __name__ == '__main__':
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 2
+    mode = 1
     mode_str = "full" if mode == 0 else "simplified"
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
@@ -1143,11 +1220,12 @@ if __name__ == '__main__':
     our_ai_agent.prepare_for_training()
     current_epoch = 0
     #current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)
-    for i in range(0, 1):
+    """for i in range(0, 1):
         our_ai_agent.prepare_for_training()
-        current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)
+        current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)"""
         #our_ai_agent.prepare_for_evaluation()
-        #evaluate_against_random(boards, random_agent, our_ai_agent)
+        #evaluate_dqn_against_random(boards, random_agent, our_ai_agent)
     our_ai_agent.prepare_for_evaluation()
-    evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent)
-    our_ai_agent.save_all_models()
+    evaluate_a2c_against_random(boards, random_agent, our_ai_agent)
+    #evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent)
+    #our_ai_agent.save_all_models()

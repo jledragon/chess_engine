@@ -468,7 +468,7 @@ class A2CChessNetwork:
             cross_entropy_total = cross_entropy_total + F.cross_entropy(ap, graph_probs[i])
         cross_entropy_mean = cross_entropy_total / state.shape[0]
         reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
-        combined_loss = cross_entropy_mean + 2 * reward_loss
+        combined_loss = cross_entropy_mean + 5 * reward_loss
         print(f"Cross entropy loss: {cross_entropy_mean}, Reward loss: {reward_loss}")
         self.optimiser.zero_grad()
         combined_loss.backward()
