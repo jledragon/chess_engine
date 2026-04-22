@@ -1125,7 +1125,7 @@ if __name__ == '__main__':
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 1
+    mode = 2
     mode_str = "full" if mode == 0 else "simplified"
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()

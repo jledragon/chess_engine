@@ -186,6 +186,20 @@ class BatchedBoard {
                     squares[batch][6][7].setPiece(Piece('q', false, 6, 7));
                 }
             }
+            if (setup_starting_pieces && configuration == 2) {
+                // Highly simplified chess with pawns to test pawn promotions.
+                for (int batch=0; batch<batch_size; batch++) {
+                    squares[batch][0][0].setPiece(Piece('k', true, 0, 0));
+                    squares[batch][0][1].setPiece(Piece('r', true, 0, 1));
+                    squares[batch][1][0].setPiece(Piece('q', true, 1, 0));
+                    squares[batch][6][1].setPiece(Piece('p', true, 6, 1, false, false));
+
+                    squares[batch][7][7].setPiece(Piece('k', false, 7, 7));
+                    squares[batch][7][6].setPiece(Piece('r', false, 7, 6));
+                    squares[batch][6][7].setPiece(Piece('q', false, 6, 7));
+                    squares[batch][1][6].setPiece(Piece('p', false, 1, 6, false, false));
+                }
+            }
         }
 
         std::vector<std::vector<std::vector<Square>>> get_squares() {

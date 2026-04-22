@@ -321,10 +321,11 @@ def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
     piece_enc_sum = torch.sum(enc[0:5])
     promo_letter = ""
     if enc[0] == 1 and piece_enc_sum == 1 and move[0][2] == 7:
-        promo_index = torch.nonzero(promotion)
-        print(promotion, promo_index, "debug")
+        if len(promotion.shape) == 2 and promotion.shape[0] == 1:
+            promotion = promotion[0]
+        promo_index = torch.argwhere(promotion)
         assert promo_index.shape[1] == 1
-        promo_letter = _promotion_indices.inverse(promo_index[0][0])
+        promo_letter = _promotion_indices.inverse[promo_index[0][0].item()]
     if invert:
         move = 7 - move
     return f"{_cols[move[0][1]]}{move[0][0]+1}{_cols[move[0][3]]}{move[0][2]+1}{promo_letter}"
