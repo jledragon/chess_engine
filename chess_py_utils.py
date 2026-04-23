@@ -289,7 +289,7 @@ def get_new_batch_splits(is_promotion, num_moves_per_batch_element):
     for b_num in num_moves_per_batch_element:
         is_prom_slice = is_promotion[total:total+b_num]
         total += b_num
-        splits.append(b_num + torch.unsqueeze(torch.sum(is_prom_slice), 0))
+        splits.append(b_num + 3 * torch.unsqueeze(torch.sum(is_prom_slice), 0))
     return torch.cat(splits).to(torch.int32).cuda()
 
 @conditional_compile

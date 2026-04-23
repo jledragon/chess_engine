@@ -99,6 +99,14 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
     def self_play_and_training_session(self, boards, start_epoch):
         pass
 
+    @abstractmethod
+    def save_data(self):
+        pass
+
+    @abstractmethod
+    def load_data(self):
+        pass
+
     def log_stockfish_move(self, move, board_state, starting_colour_me):
         """
         Record to the JLE game state what the Stockfish move was.
@@ -420,6 +428,12 @@ class DQNMoveAgent(JLEAIMoveAgent):
     
     def load_all_models(self):
         self.q_network.load_models('train')
+
+    def save_data(self):
+        pass  # TODO
+
+    def load_data(self):
+        pass  # TODO
 
 
 class MCTSNode:
@@ -809,8 +823,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.artifacts_dir = Path('.') / artifacts_dir / now_str
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.training_memory = A2CGameMemory(10_000, 256)
-        self.num_iter_delta = 100
-        self.num_iters_to_train = 100
+        self.num_iter_delta = 200
+        self.num_iters_to_train = 200
 
     def end_episode(self):
         self.whites_move = True
@@ -856,10 +870,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
         if self.whites_move:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.white_mcts, self.running_white_states, self.running_white_prob)
             self._inform_other_player_of_move(self.black_mcts, a2c_move)
-            # Next to do 17/04/2026:
+            # Next to do 23/04/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
-            # Fix memory leak - GPU usage creeps up as training goes on
+            # Save data at the end of training
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
             # Experiment with multithreading
@@ -900,7 +914,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         return current_epoch
 
     def update_training_params(self, num_logged_games):
-        self.num_iters_to_train += self.num_iter_delta
+        if self.num_iters_to_train < 2_000:
+            self.num_iters_to_train += self.num_iter_delta
 
     def log_opponent_move(self, move, promotion, board_state):
         # A generic component of log_stockfish_move
@@ -979,6 +994,22 @@ class A2CMoveAgent(JLEAIMoveAgent):
         
         return current_epoch
 
+    def save_data(self):
+        data_map = {
+            "state_buffer": self.training_memory.state_buffer,
+            "mcts_prob_buffer": self.training_memory.mcts_prob_buffer,
+            "game_value_buffer": self.training_memory.game_value_buffer,
+            "game_num_buffer": self.training_memory.game_num_buffer,
+        }
+        torch.save(data_map, "datasets/latest.pt")
+
+    def load_data(self):
+        loaded = torch.load("datasets/latest.pt")
+        self.training_memory.state_buffer = loaded["state_buffer"]
+        self.training_memory.mcts_prob_buffer = loaded["mcts_prob_buffer"]
+        self.training_memory.game_value_buffer = loaded["game_value_buffer"]
+        self.training_memory.game_num_buffer = loaded["game_num_buffer"]
+
 
 class RandomMoveAgent(JLEAIMoveAgent):
     """
@@ -1020,6 +1051,12 @@ class RandomMoveAgent(JLEAIMoveAgent):
         pass
     
     def load_all_models(self):
+        pass
+
+    def save_data(self):
+        pass
+
+    def load_data(self):
         pass
 
 
@@ -1202,7 +1239,7 @@ if __name__ == '__main__':
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 1
+    mode = 2
     mode_str = "full" if mode == 0 else "simplified"
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
@@ -1216,16 +1253,18 @@ if __name__ == '__main__':
         our_ai_agent = A2CMoveAgent(boards, starting_position, {}, args.artifacts_dir)
         assert boards.get_batch_size() == 1
     #our_ai_agent.load_all_models()
+    #our_ai_agent.load_data()
     random_agent = RandomMoveAgent(boards, starting_position)
     our_ai_agent.prepare_for_training()
     current_epoch = 0
     #current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)
-    """for i in range(0, 1):
+    for i in range(0, 1):
         our_ai_agent.prepare_for_training()
-        current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)"""
+        current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)
         #our_ai_agent.prepare_for_evaluation()
         #evaluate_dqn_against_random(boards, random_agent, our_ai_agent)
-    our_ai_agent.prepare_for_evaluation()
-    evaluate_a2c_against_random(boards, random_agent, our_ai_agent)
+    #our_ai_agent.prepare_for_evaluation()
+    #evaluate_a2c_against_random(boards, random_agent, our_ai_agent)
     #evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent)
-    #our_ai_agent.save_all_models()
+    our_ai_agent.save_all_models()
+    our_ai_agent.save_data()

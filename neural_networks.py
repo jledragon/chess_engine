@@ -393,7 +393,7 @@ class A2CChessNetwork:
         self.lr = self.chess_network.lr  # All use the same class, so all lr should be the same.
         self.optimiser = SharedAdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
         self.optimiser.share_memory()
-        self.softmax = nn.Softmax(dim=1)  # Likely deprecated - always use log.
+        self.softmax = nn.Softmax(dim=1)
         self.log_softmax = nn.LogSoftmax(dim=1)
         self.train_mode = True
         self.gamma = 0.99
@@ -426,8 +426,7 @@ class A2CChessNetwork:
         valid_move_indices = torch.argwhere(finite_log_probs)[:,1:]
         valid_probs = torch.exp(log_move_probs[ml_mask])
         valid_promotion_probs_per_move = out_prom[ml_mask]
-        log_val_prom = self.log_softmax(valid_promotion_probs_per_move)
-        val_prom = torch.isfinite(log_val_prom)
+        val_prom = self.softmax(valid_promotion_probs_per_move)
         expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs, num_moves_per_batch_element)
         all_expanded_moves = []
         all_expanded_promotions = []
@@ -465,7 +464,7 @@ class A2CChessNetwork:
         cross_entropy_total = 0
         _, _, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
         for i, ap in enumerate(action_probs):
-            cross_entropy_total = cross_entropy_total + F.cross_entropy(ap, graph_probs[i])
+            cross_entropy_total = cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])
         cross_entropy_mean = cross_entropy_total / state.shape[0]
         reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
         combined_loss = cross_entropy_mean + 5 * reward_loss
