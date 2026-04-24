@@ -873,7 +873,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Next to do 23/04/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
-            # Save data at the end of training
+            # See whether the final generate children/rollout step could be moved to the top of the loop (to save compute)
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
             # Experiment with multithreading
@@ -979,6 +979,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 true_game_value = get_game_value_for_white(major_outcomes, colour_list[0]).detach()
                 self.save_game_to_memory(true_game_value, num_logged_games)
                 num_logged_games += 1
+                print(f"{num_logged_games} logged games")
                 if num_logged_games % train_cadence == 0:
                     self.model.set_train_mode()
                     current_epoch = self.train_on_data(current_epoch)
@@ -1239,7 +1240,7 @@ if __name__ == '__main__':
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 2
+    mode = 0
     mode_str = "full" if mode == 0 else "simplified"
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
