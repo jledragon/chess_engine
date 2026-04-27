@@ -516,6 +516,10 @@ class MCTSGraph:
         self.boards = boards
         self.value_mask = torch.tensor([1, -1, 0]).to(torch.float32).cuda()
         self.batch_size = 256
+        self.nodes_marked_for_generation = []
+        self.nodes_marked_for_rollout = []
+        self.cpuct_base = 19_652
+        self.cpuct_init = 2.5
 
     def reset_graph(self):
         self.top_node = None
@@ -666,26 +670,25 @@ class MCTSGraph:
         node.is_leaf = False
     
     @conditional_compile
-    def get_max_ucbi_index(self, values_tensor):
-        # UCB1
-        ucbi_tensor = values_tensor[:,0] + 2 * torch.sqrt(torch.log(values_tensor[:,1]) / values_tensor[:,2])
-        max_index = torch.argmax(ucbi_tensor)
+    def get_max_puct_index(self, values_tensor):
+        # PUCT
+        cpuct = torch.log((values_tensor[:,3] + self.cpuct_base + 1) / self.cpuct_base) + self.cpuct_init
+        puct_tensor = values_tensor[:,0] + cpuct * values_tensor[:,2] * torch.sqrt(torch.log(values_tensor[:,1]) / (1 + values_tensor[:,3]))
+        max_index = torch.argmax(puct_tensor)
         return max_index        
     
-    def get_max_ucbi_node(self, current_state):
-        for child in current_state.children:
-            if child.N == 0:  # Shortcut - speeds things up slightly.
-                return child
-        values_tensor = torch.tensor([[child.Q, current_state.N, child.N] for child in current_state.children]).cuda()
-        max_index = self.get_max_ucbi_index(values_tensor)
+    def get_max_puct_node(self, current_state):
+        #for child in current_state.children:
+        #    if child.N == 0:  # Shortcut - speeds things up slightly.
+        #        return child
+        values_tensor = torch.tensor([[child.Q, current_state.N, child.P, child.N] for child in current_state.children]).cuda()
+        max_index = self.get_max_puct_index(values_tensor)
         return current_state.children[max_index]
 
     def generate_graph(self):
         # Compilation time is 2 minutes or longer, so disable this if debugging.
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
         self.boards.update_batch_size(self.batch_size)
-        nodes_marked_for_generation = []
-        nodes_marked_for_rollout = []
         for _ in range(0, self.depth):
             current_state = self.top_node
             # Find the next node to roll out and then do so.
@@ -695,22 +698,22 @@ class MCTSGraph:
                 if current_state.marked_for_generation:
                     # Rollout for multiple nodes at once to minimise the number of separate GPU calls
                     if current_state != self.top_node:  # Check if top node can also be rolled out here
-                        for n in nodes_marked_for_rollout:
+                        for n in self.nodes_marked_for_rollout:
                             n.marked_for_rollout = False
-                        self.rollout(nodes_marked_for_rollout)
-                        nodes_marked_for_rollout.clear()
+                        self.rollout(self.nodes_marked_for_rollout)
+                        self.nodes_marked_for_rollout.clear()
 
-                    for generation_node in nodes_marked_for_generation:
+                    for generation_node in self.nodes_marked_for_generation:
                         generation_node.marked_for_generation = False
-                    self.generate_children(nodes_marked_for_generation)
-                    nodes_marked_for_generation.clear()
+                    self.generate_children(self.nodes_marked_for_generation)
+                    self.nodes_marked_for_generation.clear()
 
-                current_state = self.get_max_ucbi_node(current_state)
+                current_state = self.get_max_puct_node(current_state)
                 backup_states.append(current_state)
 
             # Mark any eligible states for rollout
             if not current_state.rollout_done and not current_state.marked_for_rollout:
-                nodes_marked_for_rollout.append(current_state)
+                self.nodes_marked_for_rollout.append(current_state)
                 self.add_state_value(current_state)
                 current_state.marked_for_rollout = True
             game_over = torch.any(current_state.terminal_status)  # Most probably a win if so.
@@ -719,7 +722,7 @@ class MCTSGraph:
             if current_state.N >= 1 and not game_over:
                 current_state.marked_for_generation = True
                 self.fake_generate_children(current_state)
-                nodes_marked_for_generation.append(current_state)
+                self.nodes_marked_for_generation.append(current_state)
 
             # Backpropagate
             value = current_state.state_value
@@ -728,15 +731,6 @@ class MCTSGraph:
                 back_state.W = back_state.W + value
                 back_state.Q = back_state.W / back_state.N
 
-        # Clean up before these arrays go out of scope.
-        for rollout_node in nodes_marked_for_rollout:
-            rollout_node.marked_for_rollout = False
-        self.rollout(nodes_marked_for_rollout)
-        nodes_marked_for_rollout.clear()
-        for generation_node in nodes_marked_for_generation:
-            generation_node.marked_for_generation = False
-        self.generate_children(nodes_marked_for_generation)
-        nodes_marked_for_generation.clear()
         self.boards.update_batch_size(1)
     
     def choose_move_and_update_graph(self, is_training):
@@ -755,11 +749,13 @@ class MCTSGraph:
         return action, promotion
     
     def update_true_last_opponent_move(self):
-        # Deal with white MCTS if opponent's move was not what we thought (maybe move this to its own method in MCTSGraph)
+        # Deal with MCTS if opponent's move was not what we thought
         if self.top_node is not None:
             predicted_opponent_move = self.top_node.opponent_move_to_get_here
             actual_move = self.top_node.opponent_actual_move
             if predicted_opponent_move is not None and not torch.equal(actual_move, predicted_opponent_move):
+                self.nodes_marked_for_generation.clear()
+                self.nodes_marked_for_rollout.clear()
                 self.reset_graph()  # Chuck out all our computation and start over.
 
 
@@ -832,6 +828,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.running_white_states.clear()
         self.running_black_prob.clear()
         self.running_black_states.clear()
+        self.white_mcts.nodes_marked_for_generation.clear()
+        self.white_mcts.nodes_marked_for_rollout.clear()
+        self.black_mcts.nodes_marked_for_generation.clear()
+        self.black_mcts.nodes_marked_for_rollout.clear()
         # torch.cuda.empty_cache()  # Dodgy - nvidia-smi is all over the place with this.
 
     def start_episode(self):
@@ -1010,6 +1010,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.training_memory.mcts_prob_buffer = loaded["mcts_prob_buffer"]
         self.training_memory.game_value_buffer = loaded["game_value_buffer"]
         self.training_memory.game_num_buffer = loaded["game_num_buffer"]
+
+    def train_on_loaded_data(self):
+        self.model.set_train_mode()
+        self.train_on_data(0)
 
 
 class RandomMoveAgent(JLEAIMoveAgent):
@@ -1240,7 +1244,7 @@ if __name__ == '__main__':
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 0
+    mode = 1
     mode_str = "full" if mode == 0 else "simplified"
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
@@ -1255,6 +1259,7 @@ if __name__ == '__main__':
         assert boards.get_batch_size() == 1
     #our_ai_agent.load_all_models()
     #our_ai_agent.load_data()
+    #our_ai_agent.train_on_loaded_data()
     random_agent = RandomMoveAgent(boards, starting_position)
     our_ai_agent.prepare_for_training()
     current_epoch = 0

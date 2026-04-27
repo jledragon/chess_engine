@@ -463,9 +463,16 @@ class A2CChessNetwork:
         move_layer = chess_cpp.get_moves_for_player(state)
         cross_entropy_total = 0
         _, _, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
+        valid_batches = 0
         for i, ap in enumerate(action_probs):
-            cross_entropy_total = cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])
-        cross_entropy_mean = cross_entropy_total / state.shape[0]
+            if not len(ap) == 1:
+                # In cases there there was not only one move.
+                valid_batches += 1
+                cross_entropy_total = cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])
+        if valid_batches > 0:
+            cross_entropy_mean = cross_entropy_total / valid_batches
+        else:
+            cross_entropy_mean = 0  # safety
         reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
         combined_loss = cross_entropy_mean + 5 * reward_loss
         print(f"Cross entropy loss: {cross_entropy_mean}, Reward loss: {reward_loss}")

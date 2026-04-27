@@ -15,6 +15,7 @@ COPY stockfish/ ./stockfish
 COPY mobile_cvt/ ./mobile_cvt
 RUN mkdir models
 RUN mkdir datasets
+RUN mkdir artifacts
 
 # Install CUDA toolkit, allowing us to compile
 RUN wget https://developer.download.nvidia.com/compute/cuda/13.0.0/local_installers/cuda-repo-debian12-13-0-local_13.0.0-580.65.06-1_amd64.deb

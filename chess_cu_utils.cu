@@ -1011,9 +1011,8 @@ template<typename scalar_t> __global__ void expandPromotions_cu(scalar_t* __rest
     int thisBatch = blockIdx.x * blockDim.x + threadIdx.x;
     if (thisBatch < arraySize) {
         int thisArea = thisBatch * 4;
-        int newIndex = 0;
+        int newIndex = thisBatch;
         for (int i=0; i<thisBatch; i++) {
-            newIndex += 1;
             if (promoteMask[i] == 1) {
                 newIndex += 3;
             }
@@ -1052,9 +1051,8 @@ template<typename scalar_t> __global__ void expandMoves_cu(scalar_t* __restrict_
     int thisBatch = blockIdx.x * blockDim.x + threadIdx.x;
     if (thisBatch < arraySize) {
         int thisArea = thisBatch * 4;
-        int newIndex = 0;
+        int newIndex = thisBatch;
         for (int i=0; i<thisBatch; i++) {
-            newIndex += 1;
             if (promoteMask[i] == 1) {
                 newIndex += 3;
             }
@@ -1080,9 +1078,8 @@ template<typename scalar_t> __global__ void expandBoards_cu(scalar_t* __restrict
     int thisBatch = blockIdx.x * blockDim.x + threadIdx.x;
     if (thisBatch < arraySize) {
         int thisArea = thisBatch * encodingSize * boardSize * boardSize;
-        int newIndex = 0;
+        int newIndex = thisBatch;
         for (int i=0; i<thisBatch; i++) {
-            newIndex += 1;
             if (promoteMask[i] == 1) {
                 newIndex += 3;
             }
@@ -1106,9 +1103,8 @@ template<typename scalar_t> __global__ void expandBoards_cu(scalar_t* __restrict
 template<typename scalar_t> __global__ void expandValidProbs_cu(float* __restrict__ valid_probs, float* __restrict__ newValidProbs, bool* __restrict__ promoteMask, const int arraySize) {
     int thisBatch = blockIdx.x * blockDim.x + threadIdx.x;
     if (thisBatch < arraySize) {
-        int newIndex = 0;
+        int newIndex = thisBatch;
         for (int i=0; i<thisBatch; i++) {
-            newIndex += 1;
             if (promoteMask[i] == 1) {
                 newIndex += 3;
             }
