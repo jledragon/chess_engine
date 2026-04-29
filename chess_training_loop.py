@@ -675,13 +675,13 @@ class MCTSGraph:
         cpuct = torch.log((values_tensor[:,3] + self.cpuct_base + 1) / self.cpuct_base) + self.cpuct_init
         puct_tensor = values_tensor[:,0] + cpuct * values_tensor[:,2] * torch.sqrt(torch.log(values_tensor[:,1]) / (1 + values_tensor[:,3]))
         max_index = torch.argmax(puct_tensor)
-        return max_index        
+        return max_index
     
     def get_max_puct_node(self, current_state):
         #for child in current_state.children:
         #    if child.N == 0:  # Shortcut - speeds things up slightly.
         #        return child
-        values_tensor = torch.tensor([[child.Q, current_state.N, child.P, child.N] for child in current_state.children]).cuda()
+        values_tensor = torch.tensor([[child.Q, current_state.N, current_state.P[i], child.N] for i, child in enumerate(current_state.children)]).cuda()
         max_index = self.get_max_puct_index(values_tensor)
         return current_state.children[max_index]
 
@@ -764,30 +764,47 @@ class A2CGameMemory:
     def __init__(self, max_size, batch_size):
         self.max_size = max_size
         self.state_buffer = torch.empty((0, 8, 8, 8)).to(torch.int8)
+        self.num_times_seen = torch.empty((0)).to(torch.int32)
         self.mcts_prob_buffer = []  # Variable size
         self.game_value_buffer = torch.empty((0)).to(torch.float32)
-        self.game_num_buffer = torch.empty((0)).to(torch.int32)  # Mostly for reference
         self.training_batch_size = batch_size
+        self.once = torch.ones((1)).to(torch.int8)
 
-    def add_to_memory(self, state, mcts_probs, game_val, game_num):
+    def _append(self, begin, states, mcts_probs, game_val, num_times):
+        game_val_template = torch.ones((states.shape[0])).to(torch.float32) * game_val
+        self.state_buffer = torch.cat((self.state_buffer[begin:], states), dim=0)
+        self.game_value_buffer = torch.cat((self.game_value_buffer[begin:], game_val_template), dim=0)
+        self.num_times_seen = torch.cat((self.num_times_seen[begin:], num_times), dim=0)
+        self.mcts_prob_buffer = self.mcts_prob_buffer + mcts_probs
+
+    def add_to_memory(self, state, mcts_probs, game_val):
+        # Delete the starting indices when memory gets too large
         if self.state_buffer.shape[0] > self.max_size:
             begin = self.state_buffer.shape[0] - self.max_size
         else:
             begin = 0
-        game_vals = torch.ones((state.shape[0])).to(torch.float32) * game_val
-        game_nums = torch.ones((state.shape[0])).to(torch.int32) * game_num
-        self.state_buffer = torch.cat((self.state_buffer[begin:], state), dim=0)
-        self.game_value_buffer = torch.cat((self.game_value_buffer[begin:], game_vals), dim=0)
-        self.game_num_buffer = torch.cat((self.game_num_buffer[begin:], game_nums), dim=0)
         for del_index in range(begin):
             self.mcts_prob_buffer.pop(0)
-        self.mcts_prob_buffer = self.mcts_prob_buffer + mcts_probs
+        if self.state_buffer.shape[0] == 0:
+            self._append(begin, state, mcts_probs, game_val, torch.ones((state.shape[0])).to(torch.int8))
+        else:
+            flattened_buffer = self.state_buffer.reshape(self.state_buffer.shape[0], -1)
+            for move_ind in range(0, state.shape[0]):
+                state_i = state[move_ind].reshape(1, -1)
+                matches = torch.all(torch.where(flattened_buffer == state_i, True, False), dim=1)
+                match_ind = torch.argwhere(matches).flatten()
+                if match_ind.shape[0] == 0:
+                    self._append(begin, state[move_ind:move_ind+1], [mcts_probs[move_ind]], game_val, self.once)
+                else:
+                    self.game_value_buffer[match_ind] = self.game_value_buffer[match_ind] + game_val
+                    self.num_times_seen[match_ind] = self.num_times_seen[match_ind] + 1
+                    self.mcts_prob_buffer[match_ind] = self.mcts_prob_buffer[match_ind] + mcts_probs[move_ind]
 
     def sample_training_batch(self):
         rand_sample_indices = torch.randint(low=0, high=self.state_buffer.shape[0], size=(self.training_batch_size,))
         states = self.state_buffer[rand_sample_indices].cuda()
-        mcts_probs = [self.mcts_prob_buffer[ind].cuda() for ind in rand_sample_indices]
-        game_vals = self.game_value_buffer[rand_sample_indices].cuda()
+        mcts_probs = [self.mcts_prob_buffer[ind].cuda() / self.num_times_seen[ind].cuda() for ind in rand_sample_indices]
+        game_vals = self.game_value_buffer[rand_sample_indices].cuda() / self.num_times_seen[rand_sample_indices].cuda()
         return states, mcts_probs, game_vals
 
 
@@ -819,8 +836,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.artifacts_dir = Path('.') / artifacts_dir / now_str
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.training_memory = A2CGameMemory(10_000, 256)
-        self.num_iter_delta = 200
-        self.num_iters_to_train = 200
+        self.num_iter_delta = 50
+        self.num_iters_to_train = 100
 
     def end_episode(self):
         self.whites_move = True
@@ -840,19 +857,19 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
     def _decide_move_for_player(self, board_tensor, player_mcts, player_states, player_probs):
         # Get the moves
+        self.model.set_test_mode()
         move_layer = chess_cpp.get_moves_for_player(board_tensor)
         player_mcts.update_true_last_opponent_move()  # Potentially resets the graph if opponent did something different to our assumption.
         player_mcts.init_top_node_if_empty_graph(board_tensor, move_layer)
         start = time.time()
         with torch.no_grad():
-            self.model.set_test_mode()
             if torch.sum(move_layer) > 0:
                 player_mcts.generate_graph()  # The new way.
                 print(time.time() - start)
                 if self.training:
                     player_states.append(player_mcts.top_node.current_board.clone().cpu())
                     player_probs.append(player_mcts.top_node.get_probability_distribution().cpu())
-            self.model.set_train_mode()
+        self.model.set_train_mode()
         if torch.sum(move_layer) > 0:
             a2c_move, a2c_promotion = player_mcts.choose_move_and_update_graph(is_training=self.training)
         else:
@@ -873,10 +890,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Next to do 23/04/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
-            # See whether the final generate children/rollout step could be moved to the top of the loop (to save compute)
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
             # Experiment with multithreading
+            # Randomly flip half of the states when training
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.black_mcts, self.running_black_states, self.running_black_prob)
             self._inform_other_player_of_move(self.white_mcts, a2c_move)
@@ -900,8 +917,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
     def save_game_to_memory(self, true_game_value, game_num):
         w_states_this_game = torch.cat(self.running_white_states, dim=0)
         b_states_this_game = torch.cat(self.running_black_states, dim=0)
-        self.training_memory.add_to_memory(w_states_this_game, self.running_white_prob, true_game_value.cpu(), game_num)
-        self.training_memory.add_to_memory(b_states_this_game, self.running_black_prob, -true_game_value.cpu(), game_num)
+        self.training_memory.add_to_memory(w_states_this_game, self.running_white_prob, true_game_value.cpu())
+        self.training_memory.add_to_memory(b_states_this_game, self.running_black_prob, -true_game_value.cpu())
 
     def train_step(self, epoch):
         states, mcts_probs, game_vals = self.training_memory.sample_training_batch()
@@ -912,6 +929,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
         for current_epoch in range(start_epoch, start_epoch + self.num_iters_to_train):
             self.train_step(current_epoch)
         return current_epoch
+
+    def analyse_loaded_data_and_models(self):
+        # A sandbox area to look more closely at previous data or models.
+        pass
 
     def update_training_params(self, num_logged_games):
         if self.num_iters_to_train < 2_000:
@@ -1000,7 +1021,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
             "state_buffer": self.training_memory.state_buffer,
             "mcts_prob_buffer": self.training_memory.mcts_prob_buffer,
             "game_value_buffer": self.training_memory.game_value_buffer,
-            "game_num_buffer": self.training_memory.game_num_buffer,
+            "num_times_seen": self.training_memory.num_times_seen,
         }
         torch.save(data_map, "datasets/latest.pt")
 
@@ -1259,6 +1280,7 @@ if __name__ == '__main__':
         assert boards.get_batch_size() == 1
     #our_ai_agent.load_all_models()
     #our_ai_agent.load_data()
+    #our_ai_agent.analyse_loaded_data_and_models()
     #our_ai_agent.train_on_loaded_data()
     random_agent = RandomMoveAgent(boards, starting_position)
     our_ai_agent.prepare_for_training()

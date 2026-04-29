@@ -237,19 +237,22 @@ class SimpleLinearNetwork(nn.Module):
         self.h_layer = nn.Linear(4096, 4096)
         self.y_layer = nn.Linear(4096, 4096)
         self.prom_layer = nn.Linear(4096, 4 * 4096)
+        self.bn_1 = nn.BatchNorm1d(4096)
+        self.bn_2 = nn.BatchNorm1d(4096)
+        self.prom_layer = nn.Linear(4096, 4 * 4096)
+        self.value_part = value_part
         nn.init.xavier_uniform_(self.x_layer.weight)
         nn.init.xavier_uniform_(self.h_layer.weight)
         nn.init.xavier_uniform_(self.y_layer.weight)
-        # The capstone layer exists so that all trainable weights have an impact on all moves.
-        self.capstone = nn.Linear(4096, 4096)
-        self.capstone.weight = torch.nn.Parameter(torch.ones((4096, 4096)))
-        self.capstone.bias = torch.nn.Parameter(torch.zeros((4096)))
-        self.capstone.eval()
+        if value_part:
+            self.hidden_v_layer = nn.Linear(4096, 512)
+            nn.init.xavier_uniform_(self.hidden_v_layer.weight)
+            self.bn_3 = nn.BatchNorm1d(512)
+            self.v_layer = nn.Linear(512, 1)
         self.lr = 1e-4
     
     def set_train_mode(self):
         self.train()
-        self.capstone.eval()
 
     def set_test_mode(self):
         self.eval()
@@ -260,13 +263,18 @@ class SimpleLinearNetwork(nn.Module):
     def forward(self, board):
         board = board.reshape(board.shape[0], 384)
         #promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
-        xh = F.relu(self.x_layer(board.to(torch.float32)))
-        hh = self.h_layer(xh)
+        xh = F.relu(self.bn_1(self.x_layer(board.to(torch.float32))))
+        hh = F.relu(self.bn_2(self.h_layer(xh)))
         out = self.y_layer(hh)
-        out = self.capstone(out)
         promo = self.prom_layer(hh)
-        promo = promo.reshape(1, 4096, 4)
-        return out, promo
+        promo = promo.reshape(hh.shape[0], 4096, 4)
+        if not self.value_part:
+            return out, promo
+        else:
+            hv = F.relu(self.bn_3(self.hidden_v_layer(xh)))
+            hv_1 = hv.reshape(hv.shape[0], 512)
+            v = torch.tanh(self.v_layer(hv_1))
+            return out, promo, v
 
 
 class DQNChessNetwork:
@@ -387,7 +395,8 @@ class DQNChessNetwork:
 
 class A2CChessNetwork:
     def __init__(self):
-        self.chess_network = Simple2DNetwork(True).cuda()
+        #self.chess_network = Simple2DNetwork(True).cuda()
+        self.chess_network = SimpleLinearNetwork(True).cuda()
         if os.environ.get('try_compile', 'False').lower() == 'true':
             self.chess_network = torch.compile(self.chess_network)
         self.lr = self.chess_network.lr  # All use the same class, so all lr should be the same.
@@ -465,7 +474,8 @@ class A2CChessNetwork:
         _, _, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
         valid_batches = 0
         for i, ap in enumerate(action_probs):
-            if not len(ap) == 1:
+            ap_logits = torch.logit(ap)
+            if not len(ap) == 1 and torch.all(torch.isfinite(ap_logits)):
                 # In cases there there was not only one move.
                 valid_batches += 1
                 cross_entropy_total = cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])
