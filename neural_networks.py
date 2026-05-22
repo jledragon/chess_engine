@@ -134,7 +134,7 @@ class Simple2DNetwork(nn.Module):
             nn.init.xavier_uniform_(self.hidden_v_layer.weight)
             nn.init.xavier_uniform_(self.v1_layer.weight)
             nn.init.xavier_uniform_(self.v2_layer.weight)
-        self.lr = 1e-4
+        self.lr = 1e-3
     
     def set_train_mode(self):
         self.train()

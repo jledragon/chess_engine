@@ -18,6 +18,7 @@ import platform
 import numpy as np
 from datetime import datetime as dt
 from pathlib import Path
+from torch.distributions.dirichlet import Dirichlet
 from chess_py_utils import (
     get_repetition_status,
     is_game_over,
@@ -520,6 +521,8 @@ class MCTSGraph:
         self.nodes_marked_for_rollout = []
         self.cpuct_base = 19_652
         self.cpuct_init = 2.5
+        self.dir_alpha = 0.3
+        self.mcts_noise = 0.25
 
     def reset_graph(self):
         self.top_node = None
@@ -673,19 +676,26 @@ class MCTSGraph:
     def get_max_puct_index(self, values_tensor):
         # PUCT
         cpuct = torch.log((values_tensor[:,3] + self.cpuct_base + 1) / self.cpuct_base) + self.cpuct_init
-        puct_tensor = values_tensor[:,0] + cpuct * values_tensor[:,2] * torch.sqrt(torch.log(values_tensor[:,1]) / (1 + values_tensor[:,3]))
+        puct_tensor = values_tensor[:,0] + cpuct * (values_tensor[:,2] * torch.sqrt(values_tensor[:,1]) / (1 + values_tensor[:,3]))
         max_index = torch.argmax(puct_tensor)
         return max_index
     
-    def get_max_puct_node(self, current_state):
+    def get_max_puct_node(self, current_state, is_training):
         #for child in current_state.children:
         #    if child.N == 0:  # Shortcut - speeds things up slightly.
         #        return child
-        values_tensor = torch.tensor([[child.Q, current_state.N, current_state.P[i], child.N] for i, child in enumerate(current_state.children)]).cuda()
+        if is_training:
+            dirichtlet = Dirichlet(torch.ones_like(current_state.P) * self.dir_alpha)
+            # Add noise, as described in the paper.
+            noise = dirichtlet.sample()
+            p = (1 - self.mcts_noise) * current_state.P + self.mcts_noise * noise
+        else:
+            p = current_state.P
+        values_tensor = torch.tensor([[child.Q, current_state.N, p[i], child.N] for i, child in enumerate(current_state.children)]).cuda()
         max_index = self.get_max_puct_index(values_tensor)
         return current_state.children[max_index]
 
-    def generate_graph(self):
+    def generate_graph(self, is_training):
         # Compilation time is 2 minutes or longer, so disable this if debugging.
         # Takes ~20s for move 1 if uncompiled and ~12s if compiled, currently. Look into ways to make this faster.
         self.boards.update_batch_size(self.batch_size)
@@ -708,7 +718,7 @@ class MCTSGraph:
                     self.generate_children(self.nodes_marked_for_generation)
                     self.nodes_marked_for_generation.clear()
 
-                current_state = self.get_max_puct_node(current_state)
+                current_state = self.get_max_puct_node(current_state, is_training)
                 backup_states.append(current_state)
 
             # Mark any eligible states for rollout
@@ -836,8 +846,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.artifacts_dir = Path('.') / artifacts_dir / now_str
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.training_memory = A2CGameMemory(10_000, 256)
-        self.num_iter_delta = 50
-        self.num_iters_to_train = 100
+        self.num_iter_delta = 15
+        self.num_iters_to_train = 30
 
     def end_episode(self):
         self.whites_move = True
@@ -864,7 +874,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
         start = time.time()
         with torch.no_grad():
             if torch.sum(move_layer) > 0:
-                player_mcts.generate_graph()  # The new way.
+                player_mcts.generate_graph(self.training)  # The new way.
                 print(time.time() - start)
                 if self.training:
                     player_states.append(player_mcts.top_node.current_board.clone().cpu())
@@ -894,6 +904,9 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Test games with white and black vs. Stockfish
             # Experiment with multithreading
             # Randomly flip half of the states when training
+            # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
+            # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
+            # Combine white and black MCTS to get better opponent modelling
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.black_mcts, self.running_black_states, self.running_black_prob)
             self._inform_other_player_of_move(self.white_mcts, a2c_move)
@@ -922,7 +935,14 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
     def train_step(self, epoch):
         states, mcts_probs, game_vals = self.training_memory.sample_training_batch()
-        self.model.update_network(states, mcts_probs, game_vals)
+        try:
+            self.model.update_network(states, mcts_probs, game_vals)
+        except Exception as e:
+            # Training seems to be error prone - save models and data if an error occurred
+            print("Something went wrong during training...")
+            self.save_data()
+            self.save_all_models()
+            raise e
 
     def train_on_data(self, start_epoch):
         print(f"Training for {self.num_iters_to_train} iterations...")
@@ -965,7 +985,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.losses = 0
         num_logged_games = 0
         total_desired_logged_games = 100
-        train_cadence = 5  # After how many more logged games to do a training cycle
+        train_cadence = 20  # After how many more logged games to do a training cycle
         total_games = 0
         while num_logged_games < total_desired_logged_games:
             states = [batched_board.clone()]
@@ -990,7 +1010,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
                     break
                 game_length = game_length + 1
 
-            game_over_message = get_game_over_message(game_over_tensor[0], colour_list[0])
+            game_over_message = get_game_over_message(game_over_tensor[0], not self.whites_move)
             if game_over_message is None:
                 game_over_message = "Max game length reached. Terminating game"
             print(f"{game_over_message}, game length: {game_length}")
@@ -1259,14 +1279,24 @@ def get_args():
     return args
 
 
+def get_mode_str(mode):
+    match mode:
+        case 0:
+            return "full"
+        case (1, 2):
+            return "simplified"
+        case (3, 4, 5, 6):
+            return "puzzle"
+
+
 if __name__ == '__main__':
     # Starting condition
     args = get_args()
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 1
-    mode_str = "full" if mode == 0 else "simplified"
+    mode = 6
+    mode_str = get_mode_str(mode)
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()

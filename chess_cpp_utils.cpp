@@ -200,6 +200,82 @@ class BatchedBoard {
                     squares[batch][1][6].setPiece(Piece('p', false, 1, 6, false, false));
                 }
             }
+            if (setup_starting_pieces && configuration == 3) {
+                // Puzzle, mate in 5. Answer for white is ne7+; rxh7+; qh1+; wxh3+; qxh4#
+                for (int batch=0; batch<batch_size; batch++) {
+                    squares[batch][0][2].setPiece(Piece('k', true, 0, 2));
+                    squares[batch][0][3].setPiece(Piece('q', true, 0, 3));
+                    squares[batch][0][7].setPiece(Piece('r', true, 0, 7));
+                    squares[batch][1][0].setPiece(Piece('p', true, 1, 0));
+                    squares[batch][1][1].setPiece(Piece('p', true, 1, 1));
+                    squares[batch][1][3].setPiece(Piece('n', true, 1, 3));
+                    squares[batch][2][4].setPiece(Piece('p', true, 2, 4, false, false));
+                    squares[batch][2][5].setPiece(Piece('p', true, 2, 5, false, false));
+                    squares[batch][3][2].setPiece(Piece('p', true, 3, 2, false, false));
+                    squares[batch][4][3].setPiece(Piece('n', true, 4, 3));
+
+                    squares[batch][7][6].setPiece(Piece('k', false, 7, 6));
+                    squares[batch][7][5].setPiece(Piece('r', false, 7, 5));
+                    squares[batch][7][2].setPiece(Piece('b', false, 7, 2));
+                    squares[batch][7][0].setPiece(Piece('r', false, 7, 0));
+                    squares[batch][6][7].setPiece(Piece('p', false, 6, 7));
+                    squares[batch][6][6].setPiece(Piece('p', false, 6, 6));
+                    squares[batch][6][5].setPiece(Piece('p', false, 6, 5));
+                    squares[batch][6][2].setPiece(Piece('p', false, 6, 2));
+                    squares[batch][6][1].setPiece(Piece('p', false, 6, 1));
+                    squares[batch][6][0].setPiece(Piece('p', false, 6, 0));
+                    squares[batch][5][0].setPiece(Piece('n', false, 5, 0));
+                    squares[batch][4][4].setPiece(Piece('p', false, 4, 4, false, false));
+                    squares[batch][1][5].setPiece(Piece('q', false, 1, 5));
+                }
+            }
+            if (setup_starting_pieces && configuration == 4) {
+                // Morphy's puzzle, mate in 2. Answer for white is ra6; b7#
+                for (int batch=0; batch<batch_size; batch++) {
+                    squares[batch][7][2].setPiece(Piece('k', true, 7, 2));
+                    squares[batch][0][0].setPiece(Piece('r', true, 0, 0));
+                    squares[batch][5][1].setPiece(Piece('p', true, 5, 1, false, false));
+
+                    squares[batch][7][0].setPiece(Piece('k', false, 7, 0));
+                    squares[batch][7][1].setPiece(Piece('b', false, 7, 1));
+                    squares[batch][6][0].setPiece(Piece('p', false, 6, 0));
+                    squares[batch][6][1].setPiece(Piece('p', false, 6, 1));
+                }
+            }
+            if (setup_starting_pieces && configuration == 5) {
+                // Puzzle, mate in 3. Answer for white is qxf7+; re8+; rf8#
+                for (int batch=0; batch<batch_size; batch++) {
+                    squares[batch][0][7].setPiece(Piece('k', true, 0, 7));
+                    squares[batch][0][5].setPiece(Piece('r', true, 0, 5));
+                    squares[batch][1][0].setPiece(Piece('p', true, 1, 0));
+                    squares[batch][2][7].setPiece(Piece('p', true, 2, 7, false, false));
+                    squares[batch][2][5].setPiece(Piece('q', true, 2, 5));
+                    squares[batch][5][4].setPiece(Piece('r', true, 5, 4));
+
+                    squares[batch][7][6].setPiece(Piece('k', false, 7, 6));
+                    squares[batch][7][5].setPiece(Piece('r', false, 7, 5));
+                    squares[batch][6][7].setPiece(Piece('p', false, 6, 7));
+                    squares[batch][6][6].setPiece(Piece('p', false, 6, 6));
+                    squares[batch][6][5].setPiece(Piece('p', false, 6, 5));
+                    squares[batch][6][1].setPiece(Piece('p', false, 6, 1));
+                    squares[batch][6][0].setPiece(Piece('p', false, 6, 0));
+                    squares[batch][1][6].setPiece(Piece('r', false, 1, 6));
+                    squares[batch][1][1].setPiece(Piece('q', false, 1, 1));
+                }
+            }
+            if (setup_starting_pieces && configuration == 6) {
+                // Puzzle, mate in 2. Answer for white is rb3; ra3#
+                for (int batch=0; batch<batch_size; batch++) {
+                    squares[batch][5][2].setPiece(Piece('k', true, 5, 2));
+                    squares[batch][2][5].setPiece(Piece('r', true, 2, 5));
+                    squares[batch][3][5].setPiece(Piece('p', true, 3, 5, false, false));
+                    squares[batch][0][4].setPiece(Piece('b', true, 0, 4));
+
+                    squares[batch][5][0].setPiece(Piece('k', false, 5, 0));
+                    squares[batch][6][0].setPiece(Piece('p', false, 6, 0));
+                    squares[batch][3][1].setPiece(Piece('p', false, 3, 1, false, false));
+                }
+            }
         }
 
         std::vector<std::vector<std::vector<Square>>> get_squares() {
