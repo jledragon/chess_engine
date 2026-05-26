@@ -111,6 +111,7 @@ class Simple2DNetwork(nn.Module):
     
     def __init__(self, value_part):
         # The 4 conv resnet blocks setup was the best performer of this bunch for the full game.
+        # See https://github.com/undera/chess-engine-nn
         super(Simple2DNetwork, self).__init__()
         self.conv_1 = nn.Conv2d(6, 256, (3, 3), padding=1) # 8
         self.conv_2 = nn.Conv2d(256, 128, (1, 1), padding=0)
@@ -395,8 +396,8 @@ class DQNChessNetwork:
 
 class A2CChessNetwork:
     def __init__(self):
-        #self.chess_network = Simple2DNetwork(True).cuda()
-        self.chess_network = SimpleLinearNetwork(True).cuda()
+        self.chess_network = Simple2DNetwork(True).cuda()
+        #self.chess_network = SimpleLinearNetwork(True).cuda()
         if os.environ.get('try_compile', 'False').lower() == 'true':
             self.chess_network = torch.compile(self.chess_network)
         self.lr = self.chess_network.lr  # All use the same class, so all lr should be the same.
