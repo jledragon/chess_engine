@@ -113,29 +113,97 @@ class Simple2DNetwork(nn.Module):
         # The 4 conv resnet blocks setup was the best performer of this bunch for the full game.
         # See https://github.com/undera/chess-engine-nn
         super(Simple2DNetwork, self).__init__()
-        self.conv_1 = nn.Conv2d(6, 256, (3, 3), padding=1) # 8
-        self.conv_2 = nn.Conv2d(256, 128, (1, 1), padding=0)
-        self.bn_1 = nn.BatchNorm2d(256)
-        self.bn_2 = nn.BatchNorm2d(128)
-        n_blocks = 4
-        self.conv_blocks = []
-        self.value_part = value_part
-        self.prom_layer = nn.Linear(8192, 4 * 4096)
-        for _ in range(n_blocks):
-            self.conv_blocks.append(ResnetBlockFC2D(256, 256).cuda())  # TODO - split the Bayesian version into its own class.
-        self.y_layer = nn.Linear(8192, 4096)
-        nn.init.xavier_uniform_(self.conv_1.weight)
-        nn.init.xavier_uniform_(self.conv_2.weight)
+
+        # 3x3 view
+        self.conv_3_1 = nn.Conv2d(6, 8, (3, 3))
+        self.bn_c31 = nn.BatchNorm2d(8)
+        nn.init.xavier_uniform_(self.conv_3_1.weight)
+        nn.init.ones_(self.bn_c31.weight)
+        nn.init.zeros_(self.conv_3_1.bias)
+        nn.init.zeros_(self.bn_c31.bias)
+        self.conv_3_2 = nn.Conv2d(8, 16, (3, 3))
+        self.bn_c32 = nn.BatchNorm2d(16)
+        nn.init.xavier_uniform_(self.conv_3_2.weight)
+        nn.init.ones_(self.bn_c32.weight)
+        nn.init.zeros_(self.conv_3_2.bias)
+        nn.init.zeros_(self.bn_c32.bias)
+        self.conv_3_3 = nn.Conv2d(16, 32, (3, 3))
+        self.bn_c33 = nn.BatchNorm2d(32)
+        nn.init.xavier_uniform_(self.conv_3_2.weight)
+        nn.init.ones_(self.bn_c32.weight)
+        nn.init.zeros_(self.conv_3_2.bias)
+        nn.init.zeros_(self.bn_c32.bias)
+
+        # 4x4 view
+        self.conv_4_1 = nn.Conv2d(6, 8, (4, 4))
+        self.bn_c41 = nn.BatchNorm2d(8)
+        nn.init.xavier_uniform_(self.conv_4_1.weight)
+        nn.init.ones_(self.bn_c41.weight)
+        nn.init.zeros_(self.conv_4_1.bias)
+        nn.init.zeros_(self.bn_c41.bias)
+        self.conv_4_2 = nn.Conv2d(8, 16, (4, 4))
+        self.bn_c42 = nn.BatchNorm2d(16)
+        nn.init.xavier_uniform_(self.conv_4_2.weight)
+        nn.init.ones_(self.bn_c42.weight)
+        nn.init.zeros_(self.conv_4_2.bias)
+        nn.init.zeros_(self.bn_c42.bias)
+
+        # 5x5 view
+        self.conv_5_1 = nn.Conv2d(6, 8, (5, 5))
+        self.bn_c51 = nn.BatchNorm2d(8)
+        nn.init.xavier_uniform_(self.conv_5_1.weight)
+        nn.init.ones_(self.bn_c51.weight)
+        nn.init.zeros_(self.conv_5_1.bias)
+        nn.init.zeros_(self.bn_c51.bias)
+        self.conv_5_2 = nn.Conv2d(8, 16, (3, 3))
+        self.bn_c52 = nn.BatchNorm2d(16)
+        nn.init.xavier_uniform_(self.conv_5_2.weight)
+        nn.init.ones_(self.bn_c52.weight)
+        nn.init.zeros_(self.conv_5_2.bias)
+        nn.init.zeros_(self.bn_c52.bias)
+
+        # 6x6 view
+        self.conv_6_1 = nn.Conv2d(6, 8, (6, 6))
+        self.bn_c61 = nn.BatchNorm2d(8)
+        nn.init.xavier_uniform_(self.conv_6_1.weight)
+        nn.init.ones_(self.bn_c61.weight)
+        nn.init.zeros_(self.conv_6_1.bias)
+        nn.init.zeros_(self.bn_c61.bias)
+
+        # 7x7 view
+        self.conv_7_1 = nn.Conv2d(6, 8, (7, 7))
+        self.bn_c71 = nn.BatchNorm2d(8)
+        nn.init.xavier_uniform_(self.conv_7_1.weight)
+        nn.init.ones_(self.bn_c71.weight)
+        nn.init.zeros_(self.conv_7_1.bias)
+        nn.init.zeros_(self.bn_c71.bias)
+
+        # 8x8 view
+        self.conv_8_1 = nn.Conv2d(6, 8, (8, 8))
+        self.bn_c81 = nn.BatchNorm2d(8)
+        nn.init.xavier_uniform_(self.conv_8_1.weight)
+        nn.init.ones_(self.bn_c81.weight)
+        nn.init.zeros_(self.conv_8_1.bias)
+        nn.init.zeros_(self.bn_c81.bias)
+
+        self.y_layer = nn.Linear(368, 4_096)
         nn.init.xavier_uniform_(self.y_layer.weight)
+        nn.init.zeros_(self.y_layer.bias)
+
+        self.value_part = value_part
+        # TODO - rethink promotions. They are currently very inefficient with parameters.
+        #self.prom_layer = nn.Linear(8192, 4 * 4096)
         if value_part:
-            self.hidden_v_layer = nn.Conv2d(256, 1, (1, 1), padding=0)
-            self.v1_layer = nn.Linear(64, 16)
-            self.v2_layer = nn.Linear(16, 1)
-            self.bn_3 = nn.BatchNorm2d(1)
-            nn.init.xavier_uniform_(self.hidden_v_layer.weight)
+            self.v1_layer = nn.Linear(368, 20)
+            self.bn_v1 = nn.BatchNorm1d(20)
+            self.v2_layer = nn.Linear(20, 1)
             nn.init.xavier_uniform_(self.v1_layer.weight)
             nn.init.xavier_uniform_(self.v2_layer.weight)
-        self.lr = 1e-3
+            nn.init.ones_(self.bn_v1.weight)
+            nn.init.zeros_(self.v1_layer.bias)
+            nn.init.zeros_(self.v2_layer.bias)
+            nn.init.zeros_(self.bn_v1.bias)
+        self.lr = 1e-4
     
     def set_train_mode(self):
         self.train()
@@ -147,22 +215,47 @@ class Simple2DNetwork(nn.Module):
         return self.parameters()
 
     def forward(self, board):
-        #promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda()
-        xh1 = F.relu(self.bn_1(self.conv_1(board.to(torch.float32))))
-        for block in self.conv_blocks:
-            xh1 = block(xh1)
-        xh2 = F.relu(self.bn_2(self.conv_2(xh1)))
-        xh3 = xh2.reshape(xh2.shape[0], 8192)
-        out = self.y_layer(xh3)
-        promo = self.prom_layer(xh3)
-        promo = promo.reshape(xh2.shape[0], 4096, 4)
+        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda() # Queen
+
+        # 3x3 view
+        xh_3x3_1 = F.relu(self.bn_c31(self.conv_3_1(board.to(torch.float32))))
+        xh_3x3_2 = F.relu(self.bn_c32(self.conv_3_2(xh_3x3_1)))
+        xh_3x3_3 = F.relu(self.bn_c33(self.conv_3_3(xh_3x3_2)))
+        xh_3x3 = xh_3x3_3.reshape(xh_3x3_3.shape[0], 128)
+
+        # 4x4 view
+        xh_4x4_1 = F.relu(self.bn_c41(self.conv_4_1(board.to(torch.float32))))
+        xh_4x4_2 = F.relu(self.bn_c42(self.conv_4_2(xh_4x4_1)))
+        xh_4x4 = xh_4x4_2.reshape(xh_4x4_2.shape[0], 64)
+
+        # 5x5 view
+        xh_5x5_1 = F.relu(self.bn_c51(self.conv_5_1(board.to(torch.float32))))
+        xh_5x5_2 = F.relu(self.bn_c52(self.conv_5_2(xh_5x5_1)))
+        xh_5x5 = xh_5x5_2.reshape(xh_5x5_2.shape[0], 64)
+
+        # 6x6 view
+        xh_6x6 = F.relu(self.bn_c61(self.conv_6_1(board.to(torch.float32))))
+        xh_6x6 = xh_6x6.reshape(xh_6x6.shape[0], 72)
+
+        # 7x7 view
+        xh_7x7 = F.relu(self.bn_c71(self.conv_7_1(board.to(torch.float32))))
+        xh_7x7 = xh_7x7.reshape(xh_7x7.shape[0], 32)
+
+        # 8x8 view
+        xh_8x8 = F.relu(self.bn_c81(self.conv_8_1(board.to(torch.float32))))
+        xh_8x8 = xh_8x8.reshape(xh_8x8.shape[0], 8)
+
+        # Features will all levels of view
+        xh = torch.cat((xh_3x3, xh_4x4, xh_5x5, xh_6x6, xh_7x7, xh_8x8), axis=1)
+        out = self.y_layer(xh)
+        #promo = self.prom_layer(xh3)
+        #promo = promo.reshape(xh2.shape[0], 4096, 4)
         if not self.value_part:
             return out, promo
         else:
-            hv = F.relu(self.bn_3(self.hidden_v_layer(xh1)))
-            hv_1 = hv.reshape(hv.shape[0], 64)
-            v1 = F.relu(self.v1_layer(hv_1))
-            v = torch.tanh(self.v2_layer(v1))
+            hv = F.relu(self.bn_v1(self.v1_layer(xh)))
+            v_out = F.relu(self.v2_layer(hv))
+            v = torch.tanh(v_out)
             return out, promo, v
 
 
@@ -435,8 +528,11 @@ class A2CChessNetwork:
         finite_log_probs = torch.isfinite(log_move_probs)
         valid_move_indices = torch.argwhere(finite_log_probs)[:,1:]
         valid_probs = torch.exp(log_move_probs[ml_mask])
-        valid_promotion_probs_per_move = out_prom[ml_mask]
-        val_prom = self.softmax(valid_promotion_probs_per_move)
+        # TODO - rethink promotions. They are currently too inefficient with NN parameters.
+        # 8x4 encoding "to" column context only would be preferable to 4096x4 encoding full from/to square context
+        #valid_promotion_probs_per_move = out_prom[ml_mask]  # old
+        #val_prom = self.softmax(valid_promotion_probs_per_move)  # old
+        val_prom = out_prom.repeat(valid_probs.shape[0], 1)  # new
         expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs, num_moves_per_batch_element)
         all_expanded_moves = []
         all_expanded_promotions = []

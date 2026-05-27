@@ -866,16 +866,15 @@ class A2CMoveAgent(JLEAIMoveAgent):
         # Choose a move
         if self.whites_move:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_white_states, self.running_white_prob)
-            # Next to do 23/04/2026:
+            # Next to do 27/05/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
-            # Experiment with multithreading
+            # Experiment with multiprocessing (this next - up to 16 processes is possible)
             # Randomly flip half of the states when training
             # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
             # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
-            # Combine white and black MCTS to get better opponent modelling
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
         self.boards.update_batch_size(1)  # To be safe.
