@@ -254,7 +254,7 @@ class Simple2DNetwork(nn.Module):
             return out, promo
         else:
             hv = F.relu(self.bn_v1(self.v1_layer(xh)))
-            v_out = F.relu(self.v2_layer(hv))
+            v_out = self.v2_layer(hv)
             v = torch.tanh(v_out)
             return out, promo, v
 

@@ -464,12 +464,12 @@ class MCTSNode:
         self.colour = colour
     
     def update_actions(self, valid_actions, valid_promotions, action_probs):
-        self.P = action_probs
+        self.P = action_probs.detach().cpu().numpy()
         self.valid_actions = valid_actions
         self.valid_promotions = valid_promotions
 
     def update_values(self, state_value, predicted_value):
-        self.state_value = state_value
+        self.state_value = state_value.detach().cpu().numpy()
         self.predicted_value = predicted_value
     
     def add_predictions(self, model_move, model_promotion, pred_value):
@@ -489,7 +489,7 @@ class MCTSNode:
         child_ns = [child.N for child in self.children]
         temperature_values = [(n / self.N) ** self.temperature for n in child_ns]
         sum_temp = sum(temperature_values)
-        norm_temp = torch.Tensor([t / sum_temp for t in temperature_values]).to(self.P.device).to(self.P.dtype)
+        norm_temp = torch.Tensor([t / sum_temp for t in temperature_values]).cuda().to(torch.float32)
         return norm_temp
 
 
@@ -512,8 +512,8 @@ class MCTSGraph:
         self.nodes_marked_for_rollout = []
         self.cpuct_base = 19_652
         self.cpuct_init = 2.5
-        self.dir_alpha = 0.3
         self.mcts_noise = 0.25
+        self.dir_alpha = 0.3
 
     def reset_graph(self):
         self.top_node = None
@@ -656,33 +656,30 @@ class MCTSGraph:
     def fake_generate_children(self, node):
         node.is_leaf = False
     
-    @conditional_compile
-    def get_max_puct_index(self, values_tensor):
+    def get_max_puct_index(self, values_array):
         # PUCT
-        cpuct = torch.log((values_tensor[:,3] + self.cpuct_base + 1) / self.cpuct_base) + self.cpuct_init
-        puct_tensor = (values_tensor[:,4] * values_tensor[:,0]) + cpuct * (values_tensor[:,2] * torch.sqrt(values_tensor[:,1]) / (1 + values_tensor[:,3]))
-        max_index = torch.argmax(puct_tensor)
+        cpuct = np.log((values_array[:,3] + self.cpuct_base + 1) / self.cpuct_base) + self.cpuct_init
+        puct_array = (values_array[:,4] * values_array[:,0]) + cpuct * (values_array[:,2] * np.sqrt(values_array[:,1]) / (1 + values_array[:,3]))
+        max_index = np.argmax(puct_array)
         return max_index
-    
+
     def get_max_puct_node(self, current_state, is_training):
         #for child in current_state.children:
         #    if child.N == 0:  # Shortcut - speeds things up slightly.
         #        return child
         if is_training:
-            dirichtlet = Dirichlet(torch.ones_like(current_state.P) * self.dir_alpha)
-            # Add noise, as described in the paper.
-            noise = dirichtlet.sample()
+            noise = np.random.dirichlet((self.dir_alpha,) * len(current_state.P)).transpose()
             p = (1 - self.mcts_noise) * current_state.P + self.mcts_noise * noise
         else:
             p = current_state.P
-        values_tensor = torch.tensor([[
+        values_array = np.array([[
             child.Q,
             current_state.N,
             p[i],
             child.N,
             1 if child.colour else -1
-        ] for i, child in enumerate(current_state.children)]).cuda()
-        max_index = self.get_max_puct_index(values_tensor)
+        ] for i, child in enumerate(current_state.children)])
+        max_index = self.get_max_puct_index(values_array)
         return current_state.children[max_index]
 
     def generate_graph(self, is_training):
@@ -728,7 +725,7 @@ class MCTSGraph:
             value = current_state.state_value
             for back_state in backup_states:
                 back_state.N = back_state.N + 1
-                back_state.W = back_state.W + value
+                back_state.W = back_state.W + value[0]
                 back_state.Q = back_state.W / back_state.N
 
         self.boards.update_batch_size(1)
@@ -825,8 +822,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.artifacts_dir = Path('.') / artifacts_dir / now_str
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.training_memory = A2CGameMemory(10_000, 256)
-        self.num_iter_delta = 15
-        self.num_iters_to_train = 30
+        self.num_iter_delta = 200
+        self.num_iters_to_train = 400
 
     def end_episode(self):
         self.whites_move = True
@@ -871,10 +868,11 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Fix any errors
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
             # Test games with white and black vs. Stockfish
-            # Experiment with multiprocessing (this next - up to 16 processes is possible)
             # Randomly flip half of the states when training
             # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
             # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
+            # Experiment with multiprocessing (this next - up to 16 processes is possible)
+            # Split scripts into train (one process), train (many processes), test against random, test against stockfish
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
         self.boards.update_batch_size(1)  # To be safe.
@@ -1017,7 +1015,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.training_memory.state_buffer = loaded["state_buffer"]
         self.training_memory.mcts_prob_buffer = loaded["mcts_prob_buffer"]
         self.training_memory.game_value_buffer = loaded["game_value_buffer"]
-        self.training_memory.game_num_buffer = loaded["game_num_buffer"]
+        self.training_memory.num_times_seen = loaded["num_times_seen"]
 
     def train_on_loaded_data(self):
         self.model.set_train_mode()
@@ -1252,7 +1250,7 @@ def get_mode_str(mode):
             return "full"
         case 1 | 2:
             return "simplified"
-        case 3 | 4 | 5 | 6:
+        case 3 | 4 | 5 | 6 | 7:
             return "puzzle"
 
 

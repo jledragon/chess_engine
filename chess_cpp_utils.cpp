@@ -276,6 +276,21 @@ class BatchedBoard {
                     squares[batch][3][1].setPiece(Piece('p', false, 3, 1, false, false));
                 }
             }
+            if (setup_starting_pieces && configuration == 7) {
+                // Puzzle, only way to not be mated in one move is kxf7
+                for (int batch=0; batch<batch_size; batch++) {
+                    squares[batch][7][4].setPiece(Piece('k', true, 7, 4));
+                    squares[batch][1][0].setPiece(Piece('r', true, 1, 0));
+                    squares[batch][1][1].setPiece(Piece('p', true, 1, 1));
+                    squares[batch][0][1].setPiece(Piece('n', true, 0, 1));
+                    squares[batch][0][0].setPiece(Piece('q', true, 0, 0));
+
+                    squares[batch][6][5].setPiece(Piece('r', false, 6, 5));
+                    squares[batch][1][6].setPiece(Piece('q', false, 1, 6));
+                    squares[batch][0][6].setPiece(Piece('n', false, 0, 6));
+                    squares[batch][0][7].setPiece(Piece('k', false, 0, 7));
+                }
+            }
         }
 
         std::vector<std::vector<std::vector<Square>>> get_squares() {
