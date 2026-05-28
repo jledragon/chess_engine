@@ -355,6 +355,15 @@ def save_full_game_artifacts(artifacts_dir, game_num, states, moves, promotions)
         turn = not turn
     game_file.write_text(game_trail, encoding="utf-8")
 
+def get_mode_str(mode):
+    match mode:
+        case 0:
+            return "full"
+        case 1 | 2:
+            return "simplified"
+        case 3 | 4 | 5 | 6 | 7:
+            return "puzzle"
+
 def get_human_readable_board(single_board_element, as_white):
     if as_white:
         board_str = Template(
