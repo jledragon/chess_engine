@@ -653,9 +653,10 @@ class A2CGameMemory:
                 if match_ind.shape[0] == 0:
                     self._append(begin, state[move_ind:move_ind+1], [mcts_probs[move_ind]], game_val, self.once)
                 else:
-                    self.game_value_buffer[match_ind] = self.game_value_buffer[match_ind] + game_val
-                    self.num_times_seen[match_ind] = self.num_times_seen[match_ind] + 1
-                    self.mcts_prob_buffer[match_ind] = self.mcts_prob_buffer[match_ind] + mcts_probs[move_ind]
+                    mi = match_ind[0]
+                    self.game_value_buffer[mi] = self.game_value_buffer[mi] + game_val
+                    self.num_times_seen[mi] = self.num_times_seen[mi] + 1
+                    self.mcts_prob_buffer[mi] = self.mcts_prob_buffer[mi] + mcts_probs[move_ind]
 
     def sample_training_batch(self):
         rand_sample_indices = torch.randint(low=0, high=self.state_buffer.shape[0], size=(self.training_batch_size,))
@@ -721,7 +722,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
                 if self.training:
                     player_states.append(self.mcts.top_node.current_board.clone().cpu())
                     player_probs.append(self.mcts.top_node.get_probability_distribution().cpu())
-        self.model.set_train_mode()
         if torch.sum(move_layer) > 0:
             a2c_move, a2c_promotion = self.mcts.choose_move_and_update_graph(is_training=self.training)
         else:
@@ -742,7 +742,6 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
             # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
             # Experiment with multiprocessing (this next - up to 16 processes is possible)
-            # Split scripts into train (one process), train (many processes), test against random, test against stockfish
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
         self.boards.update_batch_size(1)  # To be safe.
@@ -806,13 +805,13 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.log_opponent_move(jle_move, jle_promotion, board_state)
         return self.enact_move((jle_move, jle_promotion), board_state)
 
-    def self_play_and_training_session(self, boards, start_epoch):
+    def self_play_and_training_session(self, start_epoch):
         """
         Plays a game against itself (a full episode) and then learns on the data.
         """
-        boards.update_batch_size(1)
-        batched_board = boards.to_tensor().cuda()
-        dud_move_count = boards.get_starting_move_count_list()
+        self.boards.update_batch_size(1)
+        batched_board = self.boards.to_tensor().cuda()
+        dud_move_count = self.boards.get_starting_move_count_list()
         colour_list = torch.ones((1)).to(torch.bool).cuda()
         current_epoch = start_epoch
         

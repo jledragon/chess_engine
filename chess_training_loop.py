@@ -61,7 +61,6 @@ if __name__ == '__main__':
     our_ai_agent.prepare_for_training()
     current_epoch = 0
     for i in range(0, 1):
-        our_ai_agent.prepare_for_training()
-        current_epoch = our_ai_agent.self_play_and_training_session(boards, current_epoch)
+        current_epoch = our_ai_agent.self_play_and_training_session(current_epoch)
     our_ai_agent.save_all_models()
     our_ai_agent.save_data()
