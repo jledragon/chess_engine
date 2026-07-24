@@ -14,7 +14,8 @@ from random import random
 from chess_py_utils import flip_board, conditional_compile, get_mode_str
 from constants import BATCH_SIZE
 import chess_cpp
-from agents import StockfishMoveAgent, RandomMoveAgent, DQNMoveAgent, A2CMoveAgent
+from agents import StockfishMoveAgent, RandomMoveAgent, DQNMoveAgent, A2CMoveAgent, DQNExperienceBuffer, A2CGameMemory
+from neural_networks import DQNChessNetwork, A2CChessNetwork
 
 
 def evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent):
@@ -213,13 +214,17 @@ if __name__ == '__main__':
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
     if args.algorithm == "DQN":
-        our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+        model = DQNChessNetwork()
+        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
+        our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
         # Recommended batch size = 256
     elif args.algorithm == "A2C":
-        our_ai_agent = A2CMoveAgent(boards, starting_position, {}, args.artifacts_dir)
+        model = A2CChessNetwork()
+        memory = A2CGameMemory(10_000, 256)
+        our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, args.artifacts_dir)
         assert boards.get_batch_size() == 1
-    our_ai_agent.load_all_models()
-    our_ai_agent.load_data()
+    model.load_models()
+    memory.load_data()
     if args.train_further:
         #our_ai_agent.analyse_loaded_data_and_models()  # Debugging
         our_ai_agent.train_on_loaded_data()

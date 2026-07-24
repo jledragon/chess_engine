@@ -60,30 +60,6 @@ class JLEAIMoveAgent(AIMoveAgent, ABC):
     @abstractmethod
     def prepare_for_evaluation(self):
         pass
-    
-    @abstractmethod
-    def save_all_models(self):
-        pass
-    
-    @abstractmethod
-    def load_all_models(self):
-        pass
-
-    @abstractmethod
-    def train_step(self, epoch):
-        pass
-
-    @abstractmethod
-    def self_play_and_training_session(self, boards, start_epoch):
-        pass
-
-    @abstractmethod
-    def save_data(self):
-        pass
-
-    @abstractmethod
-    def load_data(self):
-        pass
 
     def log_stockfish_move(self, move, board_state, starting_colour_me):
         """

@@ -13,7 +13,10 @@ import chess_cpp
 import argparse
 from chess_py_utils import get_mode_str
 from constants import BATCH_SIZE
-from agents import DQNMoveAgent, A2CMoveAgent
+from agents import DQNMoveAgent, DQNExperienceBuffer, A2CGameMemory, train_single_threaded_a2c, train_multi_threaded_a2c, train_dqn
+from neural_networks import DQNChessNetwork, A2CChessNetwork
+from datetime import datetime as dt
+from pathlib import Path
 
 
 def get_args():
@@ -41,26 +44,31 @@ if __name__ == '__main__':
     # Insist that we have CUDA for now, otherwise things will be much slower.
     assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     torch._dynamo.config.cache_size_limit = 64
-    mode = 1
+    mode = 0
     mode_str = get_mode_str(mode)
     print(f"Training with {mode_str} chess games")
     if args.algorithm == "DQN":
+        model = DQNChessNetwork()
+        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
         boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
         batched_board = boards.to_tensor().cuda()
         starting_position = batched_board[0].clone()
         our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+        train_dqn(args, model, memory, mode)
         # Recommended batch size = 256
     elif args.algorithm == "A2C":
-        boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
-        batched_board = boards.to_tensor().cuda()
-        starting_position = batched_board[0].clone()
-        our_ai_agent = A2CMoveAgent(boards, starting_position, {}, args.artifacts_dir)
-        assert boards.get_batch_size() == 1
+        model = A2CChessNetwork()
+        memory = A2CGameMemory(100_000, 256)
+        now_str = dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+        artifacts_dir = Path('.') / args.artifacts_dir / now_str
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        train_single_threaded_a2c(artifacts_dir, model, memory, mode)
     elif args.algorithm == "A2C-MP":
-        pass  # TODO.
-    our_ai_agent.prepare_for_training()
-    current_epoch = 0
-    for i in range(0, 1):
-        current_epoch = our_ai_agent.self_play_and_training_session(current_epoch)
-    our_ai_agent.save_all_models()
-    our_ai_agent.save_data()
+        model = A2CChessNetwork()
+        memory = A2CGameMemory(100_000, 256)
+        now_str = dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+        artifacts_dir = Path('.') / args.artifacts_dir / now_str
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        train_multi_threaded_a2c(artifacts_dir, model, memory, mode)
+    model.save_models()
+    memory.save_data()

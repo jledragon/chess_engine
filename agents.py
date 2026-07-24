@@ -11,10 +11,9 @@ import chess_cpp
 from stockfish import Stockfish
 import platform
 import numpy as np
-from datetime import datetime as dt
-from pathlib import Path
 from interface import AIMoveAgent, JLEAIMoveAgent
-from constants import BATCH_SIZE
+from constants import BATCH_SIZE, TOTAL_DESIRED_LOGGED_GAMES_A2C, A2C_TRAIN_CADENCE
+import multiprocessing
 from chess_py_utils import (
     get_random_move,
     convert_jle_to_UCI_notation,
@@ -28,7 +27,6 @@ from chess_py_utils import (
     save_full_game_artifacts,
     #get_moves_for_player_with_reuse
 )
-from neural_networks import DQNChessNetwork, A2CChessNetwork
 
 
 class StockfishMoveAgent(AIMoveAgent):
@@ -118,13 +116,19 @@ class DQNExperienceBuffer:
         next_states = self.next_state_buffer[rand_sample_indices].cuda()
         return states, (moves, promotions), rewards, terminals, next_states
 
+    def save_data(self):
+        pass  # TODO
+
+    def load_data(self):
+        pass  # TODO
+
 
 class DQNMoveAgent(JLEAIMoveAgent):
     """
     A neural network, reinforcement learning-based algorithm to choose moves.
     """
 
-    def __init__(self, boards, starting_position, enabled_optional_rewards):
+    def __init__(self, boards, model, memory, starting_position, enabled_optional_rewards):
         self.boards = boards
         self.starting_position = starting_position
         self.previous_state = None
@@ -135,8 +139,8 @@ class DQNMoveAgent(JLEAIMoveAgent):
         self.opponent_action = None
         self.opponent_rewards = None
         self.opponent_terminals = None
-        self.experience_buffer = DQNExperienceBuffer(10_000, BATCH_SIZE)
-        self.q_network = DQNChessNetwork()
+        self.experience_buffer = memory
+        self.q_network = model
         self.win_reward = 300 # 100
         self.lose_reward = -100 # -100
         self.move_reward = -1.2 # -1
@@ -289,18 +293,20 @@ class DQNMoveAgent(JLEAIMoveAgent):
         dqn_move, dqn_promotion = self.q_network.get_move(board_tensor[:,:6,:,:], move_layer)
         return (dqn_move, dqn_promotion)
     
-    def save_all_models(self):
-        # Later - with these two methods, make them more configurable.
-        self.q_network.save_models()
-    
     def load_all_models(self):
         self.q_network.load_models('train')
 
-    def save_data(self):
-        pass  # TODO
 
-    def load_data(self):
-        pass  # TODO
+def train_dqn(args, model, memory, board_setup):
+    boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, board_setup)
+    assert boards.get_batch_size() > 32
+    # Recommended batch size = 256, min. 32.
+    batched_board = boards.to_tensor().cuda()
+    starting_position = batched_board[0].clone()
+    our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+    our_ai_agent.prepare_for_training()
+    current_epoch = 0
+    our_ai_agent.self_play_and_training_session(current_epoch)
 
 
 class MCTSNode:
@@ -665,6 +671,28 @@ class A2CGameMemory:
         game_vals = self.game_value_buffer[rand_sample_indices].cuda() / self.num_times_seen[rand_sample_indices].cuda()
         return states, mcts_probs, game_vals
 
+    def save_data(self):
+        data_map = {
+            "state_buffer": self.state_buffer,
+            "mcts_prob_buffer": self.mcts_prob_buffer,
+            "game_value_buffer": self.game_value_buffer,
+            "num_times_seen": self.num_times_seen,
+        }
+        torch.save(data_map, "datasets/latest.pt")
+
+    def load_data(self):
+        loaded = torch.load("datasets/latest.pt")
+        self.state_buffer = loaded["state_buffer"]
+        self.mcts_prob_buffer = loaded["mcts_prob_buffer"]
+        self.game_value_buffer = loaded["game_value_buffer"]
+        self.num_times_seen = loaded["num_times_seen"]
+
+    def save_game_to_memory(self, true_game_value, running_white_states, running_black_states, running_white_prob, running_black_prob):
+        w_states_this_game = torch.cat(running_white_states, dim=0)
+        b_states_this_game = torch.cat(running_black_states, dim=0)
+        self.add_to_memory(w_states_this_game, running_white_prob, true_game_value.cpu())
+        self.add_to_memory(b_states_this_game, running_black_prob, -true_game_value.cpu())
+
 
 class A2CMoveAgent(JLEAIMoveAgent):
     """
@@ -672,29 +700,21 @@ class A2CMoveAgent(JLEAIMoveAgent):
     the "asynchronous" part, turning it into the simpler A2C algorithm.
     """
 
-    def __init__(self, boards, starting_position, enabled_optional_rewards, artifacts_dir):
+    def __init__(self, boards, model, starting_position, enabled_optional_rewards):
         self.boards = boards
         self.starting_position = starting_position
         self.running_white_states = []
         self.running_white_prob = []
         self.running_black_states = []
         self.running_black_prob = []
-        self.model = A2CChessNetwork()
+        self.model = model
         self.training = True
         self.whites_move = True  # True is white, False is black. We can reason this way with a batch size of 1.
         self.win_reward = 100.0 / 100.0 # 100
         self.lose_reward = -100 / 100.0 # -100
         self.move_reward = -1 / 100.0
         self.max_episode_length = 64
-        self.wins = 0
-        self.losses = 0
         self.mcts = MCTSGraph(self, boards)
-        now_str = dt.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.artifacts_dir = Path('.') / artifacts_dir / now_str
-        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self.training_memory = A2CGameMemory(10_000, 256)
-        self.num_iter_delta = 200
-        self.num_iters_to_train = 400
 
     def end_episode(self):
         self.whites_move = True
@@ -733,7 +753,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
         # Choose a move
         if self.whites_move:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_white_states, self.running_white_prob)
-            # Next to do 27/05/2026:
+            # Next to do 24/07/2026:
             # Speed up generating graph even more, think of ways
             # Fix any errors
             # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
@@ -741,7 +761,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Randomly flip half of the states when training
             # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
             # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
-            # Experiment with multiprocessing (this next - up to 16 processes is possible)
+            # Fix the new bug around pawn promotions and expanding valid probs
+            # Change promotion output to be 4x8, rather than 4x4096. Check impact on VRAM and speed.
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
         self.boards.update_batch_size(1)  # To be safe.
@@ -755,42 +776,12 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.training = False
         self.model.set_test_mode()
 
-    def save_all_models(self):
-        self.model.save_models()
-
     def load_all_models(self):
         self.model.load_models('train')
-
-    def save_game_to_memory(self, true_game_value, game_num):
-        w_states_this_game = torch.cat(self.running_white_states, dim=0)
-        b_states_this_game = torch.cat(self.running_black_states, dim=0)
-        self.training_memory.add_to_memory(w_states_this_game, self.running_white_prob, true_game_value.cpu())
-        self.training_memory.add_to_memory(b_states_this_game, self.running_black_prob, -true_game_value.cpu())
-
-    def train_step(self, epoch):
-        states, mcts_probs, game_vals = self.training_memory.sample_training_batch()
-        try:
-            self.model.update_network(states, mcts_probs, game_vals)
-        except Exception as e:
-            # Training seems to be error prone - save models and data if an error occurred
-            print("Something went wrong during training...")
-            self.save_data()
-            self.save_all_models()
-            raise e
-
-    def train_on_data(self, start_epoch):
-        print(f"Training for {self.num_iters_to_train} iterations...")
-        for current_epoch in range(start_epoch, start_epoch + self.num_iters_to_train):
-            self.train_step(current_epoch)
-        return current_epoch
 
     def analyse_loaded_data_and_models(self):
         # A sandbox area to look more closely at previous data or models.
         pass
-
-    def update_training_params(self, num_logged_games):
-        if self.num_iters_to_train < 2_000:
-            self.num_iters_to_train += self.num_iter_delta
 
     def log_opponent_move(self, move, promotion, board_state):
         # A generic component of log_stockfish_move
@@ -805,90 +796,139 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.log_opponent_move(jle_move, jle_promotion, board_state)
         return self.enact_move((jle_move, jle_promotion), board_state)
 
-    def self_play_and_training_session(self, start_epoch):
+    def self_play_session(self):
         """
-        Plays a game against itself (a full episode) and then learns on the data.
+        Plays a game against itself (a full episode).
         """
         self.boards.update_batch_size(1)
         batched_board = self.boards.to_tensor().cuda()
         dud_move_count = self.boards.get_starting_move_count_list()
         colour_list = torch.ones((1)).to(torch.bool).cuda()
-        current_epoch = start_epoch
-        
-        self.wins = 0
-        self.losses = 0
-        num_logged_games = 0
-        total_desired_logged_games = 100
-        train_cadence = 20  # After how many more logged games to do a training cycle
-        total_games = 0
-        while num_logged_games < total_desired_logged_games:
-            states = [batched_board.clone()]
-            moves = []
-            promotions = []
-            game_over = False
-            episode_length = 0
-            self.start_episode()
-            game_length = 1
 
-            while not game_over:
-                (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
-                    self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
-                states.append(batched_board.clone())
-                moves.append(move)
-                promotions.append(promotion)
-                game_over = torch.any(game_over_tensor, dim=1)
-                self.whites_move = not self.whites_move
-                episode_length += 1
-                if episode_length >= self.max_episode_length:
-                    batched_board, colour_list, dud_move_count = self.reset_all((batched_board, colour_list, dud_move_count))
-                    break
-                game_length = game_length + 1
+        states = [batched_board.clone()]
+        moves = []
+        promotions = []
+        game_over = False
+        episode_length = 0
+        self.start_episode()
+        game_length = 1
 
-            game_over_message = get_game_over_message(game_over_tensor[0], not self.whites_move)
-            if game_over_message is None:
-                game_over_message = "Max game length reached. Terminating game"
-            print(f"{game_over_message}, game length: {game_length}")
-            episode_length = 0
-            major_outcomes = game_over_tensor[0, 0:3]
-            if torch.any(major_outcomes):
-                true_game_value = get_game_value_for_white(major_outcomes, colour_list[0]).detach()
-                self.save_game_to_memory(true_game_value, num_logged_games)
-                num_logged_games += 1
-                print(f"{num_logged_games} logged games")
-                if num_logged_games % train_cadence == 0:
-                    self.model.set_train_mode()
-                    current_epoch = self.train_on_data(current_epoch)
-                    self.update_training_params(num_logged_games)
-                    self.model.set_test_mode()
-            else:
-                self.model.optimiser.zero_grad()
-            save_full_game_artifacts(self.artifacts_dir, total_games + 1, states, moves, promotions)
-            self.end_episode()
-            total_games += 1
-            print(total_games)
-        print(f"Wins {self.wins}, Losses {self.losses}")
-        
+        while not game_over:
+            (move, promotion), (dud_move_count, batched_board, colour_list, opponent_move_layer, game_over_tensor) = \
+                self.decide_and_enact_move((batched_board, colour_list, dud_move_count))
+            states.append(batched_board.clone())
+            moves.append(move)
+            promotions.append(promotion)
+            game_over = torch.any(game_over_tensor, dim=1)
+            self.whites_move = not self.whites_move
+            episode_length += 1
+            if episode_length >= self.max_episode_length:
+                batched_board, colour_list, dud_move_count = self.reset_all((batched_board, colour_list, dud_move_count))
+                break
+            game_length = game_length + 1
+
+        game_over_message = get_game_over_message(game_over_tensor[0], not self.whites_move)
+        if game_over_message is None:
+            game_over_message = "Max game length reached. Terminating game"
+        print(f"{game_over_message}, game length: {game_length}")
+        episode_length = 0
+        major_outcomes = game_over_tensor[0, 0:3]
+
+        return major_outcomes, colour_list, states, moves, promotions
+
+    def training_session(self, start_epoch, num_logged_games):
+        """
+        Learn on the data that we have gathered so far.
+        """
+        self.model.set_train_mode()
+        current_epoch = self.train_on_data(start_epoch)
+        self.update_training_params(num_logged_games)
+        self.model.set_test_mode()
         return current_epoch
-
-    def save_data(self):
-        data_map = {
-            "state_buffer": self.training_memory.state_buffer,
-            "mcts_prob_buffer": self.training_memory.mcts_prob_buffer,
-            "game_value_buffer": self.training_memory.game_value_buffer,
-            "num_times_seen": self.training_memory.num_times_seen,
-        }
-        torch.save(data_map, "datasets/latest.pt")
-
-    def load_data(self):
-        loaded = torch.load("datasets/latest.pt")
-        self.training_memory.state_buffer = loaded["state_buffer"]
-        self.training_memory.mcts_prob_buffer = loaded["mcts_prob_buffer"]
-        self.training_memory.game_value_buffer = loaded["game_value_buffer"]
-        self.training_memory.num_times_seen = loaded["num_times_seen"]
 
     def train_on_loaded_data(self):
         self.model.set_train_mode()
         self.train_on_data(0)
+
+
+def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):
+    num_logged_games = 0
+    total_games = 0
+    current_training_epoch = 0
+
+    boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, board_setup)
+    assert boards.get_batch_size() == 1
+    batched_board = boards.to_tensor().cuda()
+    starting_position = batched_board[0].clone()
+    our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
+    our_ai_agent.prepare_for_training()
+
+    while num_logged_games < TOTAL_DESIRED_LOGGED_GAMES_A2C:
+        major_outcomes, colour_list, states, moves, promotions = our_ai_agent.self_play_session()
+        save_full_game_artifacts(artifacts_dir, total_games + 1, states, moves, promotions)
+        if torch.any(major_outcomes):
+            true_game_value = get_game_value_for_white(major_outcomes, colour_list[0]).detach()
+            memory.save_game_to_memory(
+                true_game_value,
+                our_ai_agent.running_white_states,
+                our_ai_agent.running_black_states,
+                our_ai_agent.running_white_prob,
+                our_ai_agent.running_black_prob,
+            )
+            num_logged_games += 1
+            print(f"{num_logged_games} logged games")
+            if num_logged_games % A2C_TRAIN_CADENCE == 0:
+                current_training_epoch = model.training_session(current_training_epoch, num_logged_games, memory)
+        our_ai_agent.end_episode()
+        total_games += 1
+        print(total_games)
+    print(f"Wins {our_ai_agent.wins}, Losses {our_ai_agent.losses}")
+
+
+def multi_threaded_a2c_process(proc_num, model, artifacts_dir, board_setup, total_games):
+    print(f"Starting process {proc_num}")
+    boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, board_setup)
+    assert boards.get_batch_size() == 1
+    batched_board = boards.to_tensor().cuda()
+    starting_position = batched_board[0].clone()
+    our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
+    our_ai_agent.prepare_for_training()
+    major_outcomes, colour_list, states, moves, promotions = our_ai_agent.self_play_session()
+    # total_games should refer to the finished game count before any processes are started.
+    save_full_game_artifacts(artifacts_dir, total_games + proc_num, states, moves, promotions)
+    bs = our_ai_agent.running_black_states.copy()
+    ws = our_ai_agent.running_white_states.copy()
+    bp = our_ai_agent.running_black_prob.copy()
+    wp = our_ai_agent.running_white_prob.copy()
+    our_ai_agent.end_episode()
+    return proc_num, major_outcomes, colour_list, ws, bs, wp, bp
+
+
+def train_multi_threaded_a2c(artifacts_dir, model, memory, board_setup):
+    num_logged_games = 0
+    total_games = 0
+    current_training_epoch = 0
+    num_processes = 4  # 4 for full, 12 for simplified
+    train_inc = 1
+    agent_pool = multiprocessing.Pool(processes=num_processes)
+
+    while num_logged_games < TOTAL_DESIRED_LOGGED_GAMES_A2C:
+        process_inputs = [(i, model, artifacts_dir, board_setup, total_games) for i in range(num_processes)]
+        process_values = agent_pool.starmap(multi_threaded_a2c_process, process_inputs)
+        for (proc_num, major_outcomes, col_list, ws, bs, wp, bp) in process_values:
+            if torch.any(major_outcomes):
+                true_game_value = get_game_value_for_white(major_outcomes, col_list[0]).detach()
+                memory.save_game_to_memory(true_game_value, ws, bs, wp, bp)
+                num_logged_games += 1
+                print(f"{num_logged_games} logged games")
+        torch.cuda.empty_cache()  # Clear up some VRAM, ideally
+        if num_logged_games >= A2C_TRAIN_CADENCE * train_inc:
+            current_training_epoch = model.training_session(current_training_epoch, num_logged_games, memory)
+            train_inc += 1
+        else:
+            model.optimiser.zero_grad()
+        total_games += num_processes
+        print(f"Total games: {total_games}")
 
 
 class RandomMoveAgent(JLEAIMoveAgent):
@@ -910,12 +950,6 @@ class RandomMoveAgent(JLEAIMoveAgent):
     def prepare_for_evaluation(self):
         pass
 
-    def self_play_and_training_session(self, boards, start_epoch):
-        pass
-
-    def train_step(self, epoch):
-        pass
-
     @conditional_compile
     def decide_move(self, board_state):
         board_tensor, _, _ = board_state
@@ -926,15 +960,3 @@ class RandomMoveAgent(JLEAIMoveAgent):
         # Choose a move
         randomly_selected_move, random_promotion = get_random_move(board_tensor, move_layer)
         return (randomly_selected_move, random_promotion)
-    
-    def save_all_models(self):
-        pass
-    
-    def load_all_models(self):
-        pass
-
-    def save_data(self):
-        pass
-
-    def load_data(self):
-        pass

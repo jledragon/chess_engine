@@ -503,6 +503,8 @@ class A2CChessNetwork:
         self.gae_lambda = 1.0
         self.entropy_coef = 0.01
         self.value_loss_coef = 2.0
+        self.num_iter_delta = 200
+        self.num_iters_to_train = 400
 
     @conditional_compile
     def get_move_logits(self, out_move, ml_mask):
@@ -594,7 +596,35 @@ class A2CChessNetwork:
     def set_test_mode(self):
         self.chess_network.set_test_mode()
         self.train_mode = False
-    
+
+    def update_training_params(self, num_logged_games):
+        if self.num_iters_to_train < 2_000:
+            self.num_iters_to_train += self.num_iter_delta
+
+    def training_session(self, start_epoch, num_logged_games, memory):
+        """
+        Learn on the data that we have gathered so far.
+        """
+        self.set_train_mode()
+        current_epoch = self.train_on_data(start_epoch, memory)
+        self.update_training_params(num_logged_games)
+        self.set_test_mode()
+        return current_epoch
+
+    def train_on_data(self, start_epoch, memory):
+        print(f"Training for {self.num_iters_to_train} iterations...")
+        for current_epoch in range(start_epoch, start_epoch + self.num_iters_to_train):
+            states, mcts_probs, game_vals = memory.sample_training_batch()
+            try:
+                self.update_network(states, mcts_probs, game_vals)
+            except Exception as e:
+                # Training seems to be error prone - save models and data if an error occurred
+                print("Something went wrong during training...")
+                memory.save_data()
+                self.save_models()
+                raise e
+        return current_epoch
+
     def save_models(self):
         torch.save({
             "model_state": self.chess_network.state_dict(),
