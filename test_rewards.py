@@ -9,16 +9,17 @@ Created on Thu Feb  8 22:43:25 2024
 import torch
 import unittest
 import chess_cpp
-from chess_training_loop import DQNMoveAgent
-from chess_py_utils import get_human_readable_board, flip_board
+from agents import DQNMoveAgent
+from chess_training_loop import DQNChessNetwork, DQNExperienceBuffer
+from chess_py_utils import flip_board
 
 
 BATCH_SIZE = 1
 
 
 class DummyDQNMoveAgent(DQNMoveAgent):
-    def __init__(self, boards, starting_position, enabled_optional_rewards):
-        super(DummyDQNMoveAgent, self).__init__(boards, starting_position, enabled_optional_rewards)
+    def __init__(self, boards, model, memory, starting_position, enabled_optional_rewards):
+        super(DummyDQNMoveAgent, self).__init__(boards, model, memory, starting_position, enabled_optional_rewards)
         self._stored_move = None
 
     def store_move(self, move_bundle):
@@ -69,7 +70,9 @@ class TestRewards(unittest.TestCase):
         boards.setPiece(0, extra_2)
         batched_board = boards.to_tensor().cuda()
         bb_start = batched_board.clone()[0]
-        our_ai_agent = DummyDQNMoveAgent(boards, bb_start, {"num_moves"})
+        model = DQNChessNetwork()
+        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
+        our_ai_agent = DummyDQNMoveAgent(boards, model, memory, bb_start, {"num_moves"})
         dud_move_count = boards.get_starting_move_count_list()
         colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
         # Check the initial conditions
@@ -167,7 +170,9 @@ class TestRewards(unittest.TestCase):
         boards.setPiece(0, extra_1)
         batched_board = boards.to_tensor().cuda()
         bb_start = batched_board.clone()[0]
-        our_ai_agent = DummyDQNMoveAgent(boards, bb_start, {"num_moves"})
+        model = DQNChessNetwork()
+        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
+        our_ai_agent = DummyDQNMoveAgent(boards, model, memory, bb_start, {"num_moves"})
         dud_move_count = boards.get_starting_move_count_list()
         colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
         # Make the first move, test current rewards and terminals.
@@ -224,7 +229,9 @@ class TestRewards(unittest.TestCase):
         boards.setPiece(0, extra_1)
         batched_board = boards.to_tensor().cuda()
         bb_start = batched_board.clone()[0]
-        our_ai_agent = DummyDQNMoveAgent(boards, bb_start, {"firepower"})
+        model = DQNChessNetwork()
+        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
+        our_ai_agent = DummyDQNMoveAgent(boards, model, memory, bb_start, {"firepower"})
         colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
         # Consider things the right way round.
         batched_board, _ = flip_board(batched_board, colour_list)

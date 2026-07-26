@@ -10,8 +10,8 @@ Created on Sat Apr 26 19:23:16 2025
 import torch
 import unittest
 import chess_cpp
-from chess_training_loop import A2CMoveAgent, MCTSGraph
-from chess_py_utils import get_human_readable_board
+from neural_networks import A2CChessNetwork
+from agents import A2CMoveAgent, MCTSGraph
 
 
 BATCH_SIZE = 1
@@ -36,8 +36,10 @@ class TestMCTS(unittest.TestCase):
         boards.setPiece(0, enemyKing)
         batched_board = boards.to_tensor().cuda()
         move_layer = chess_cpp.get_moves_for_player(batched_board)
-        
-        our_ai_agent = A2CMoveAgent(boards, batched_board, {})
+
+        model = A2CChessNetwork()
+        model.set_test_mode()
+        our_ai_agent = A2CMoveAgent(boards, model, batched_board, {})
         white_mcts = MCTSGraph(our_ai_agent, boards)
         # From this position, white has 27 valid moves. Set this value high enough
         # to reach terminal states - White can play mate in one.
@@ -45,7 +47,7 @@ class TestMCTS(unittest.TestCase):
         white_mcts.init_top_node_if_empty_graph(batched_board, move_layer)
         #print(get_human_readable_board(white_mcts.top_node.current_board[0,:6,:,:]))
         #print(white_mcts.top_node.opponent_move_to_get_here)
-        white_mcts.generate_graph()
+        white_mcts.generate_graph(False)
         #for child in white_mcts.top_node.children:
             #print("")
             #print(get_human_readable_board(child.current_board[0,:6,:,:]))
@@ -74,13 +76,15 @@ class TestMCTS(unittest.TestCase):
         batched_board = boards.to_tensor().cuda()
         move_layer = chess_cpp.get_moves_for_player(batched_board)
 
-        our_ai_agent = A2CMoveAgent(boards, batched_board, {})
+        model = A2CChessNetwork()
+        model.set_test_mode()
+        our_ai_agent = A2CMoveAgent(boards, model, batched_board, {})
         white_mcts = MCTSGraph(our_ai_agent, boards)
         # From this position, white has 27 valid moves. Set this value high enough
         # to reach terminal states - White can play mate in one.
         white_mcts.depth = 800
         white_mcts.init_top_node_if_empty_graph(batched_board, move_layer)
-        white_mcts.generate_graph()
+        white_mcts.generate_graph(False)
 
         # Test MCTS N, W, Q and P values. Test that the 27 first-depth moves are explored before expanding any. Test what happens when we reach a winning terminal.
         print(white_mcts.top_node.N, white_mcts.top_node.W, white_mcts.top_node.Q, white_mcts.top_node.P, len(white_mcts.top_node.children))
