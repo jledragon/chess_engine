@@ -761,8 +761,8 @@ class A2CMoveAgent(JLEAIMoveAgent):
             # Randomly flip half of the states when training
             # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
             # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
-            # Fix the new bug around pawn promotions and expanding valid probs
-            # Change promotion output to be 4x8, rather than 4x4096. Check impact on VRAM and speed.
+            # Fix the new bug around pawn promotions and expanding valid probs (may have been fixed?)
+            # Train the game value on pre-existing datasets
         else:
             a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
         self.boards.update_batch_size(1)  # To be safe.

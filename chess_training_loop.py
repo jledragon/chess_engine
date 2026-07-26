@@ -64,6 +64,7 @@ if __name__ == '__main__':
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         train_single_threaded_a2c(artifacts_dir, model, memory, mode)
     elif args.algorithm == "A2C-MP":
+        # To kill all processes mid-flight, run taskkill /im python.exe /f /t
         model = A2CChessNetwork()
         memory = A2CGameMemory(100_000, 256)
         now_str = dt.now().strftime("%Y-%m-%d_%H-%M-%S")
