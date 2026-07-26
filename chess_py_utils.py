@@ -293,7 +293,16 @@ def get_new_batch_splits(is_promotion, num_moves_per_batch_element):
     return torch.cat(splits).to(torch.int32).cuda()
 
 @conditional_compile
-def expand_all_moves(all_boards, val_prom, legal_moves, valid_probs, num_moves_per_batch_element):
+def get_new_prom_splits(num_moves_per_batch_element, valid_t2, out_prom):
+    total = 0
+    splits = []
+    for i, b_num in enumerate(num_moves_per_batch_element):
+        prom_slice = out_prom[i, valid_t2[total:total+b_num], :]
+        splits.append(prom_slice.squeeze(1))
+    return torch.cat(splits).cuda()
+
+@conditional_compile
+def expand_all_moves(all_boards, softmax_prom, legal_moves, valid_probs, num_moves_per_batch_element):
     assert all_boards.shape[1] == 8, "Remember to use the full board here."
     ft1 = legal_moves // 64
     ft2 = legal_moves % 64
@@ -305,14 +314,20 @@ def expand_all_moves(all_boards, val_prom, legal_moves, valid_probs, num_moves_p
     copied_boards = expand_all_boards(all_boards, num_moves_per_batch_element)
     assert copied_boards.shape[0] <= 65_536, "Too many copied boards."  # Safety - this can just be made larger in CPP. It is 256 x 256.
     is_promotion = chess_cpp.get_pawn_promote_move_mask(copied_boards, all_possible_moves)
-    default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(is_promotion.shape[0], 1).to(torch.int8).cuda()
-    expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
-    expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
-    expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
-    new_splits = get_new_batch_splits(is_promotion, num_moves_per_batch_element)
-    # Keep gradients here
-    expanded_valid_probs = expand_valid_probs(all_boards, valid_probs, is_promotion, val_prom)
-    return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits
+    if torch.sum(is_promotion) > 0:
+        val_prom = get_new_prom_splits(num_moves_per_batch_element, t2, softmax_prom)
+        expanded_boards = chess_cpp.expand_boards(copied_boards, is_promotion)
+        default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(is_promotion.shape[0], 1).to(torch.int8).cuda()
+        expanded_promotions = chess_cpp.expand_promotions(default_promotion, is_promotion)
+        expanded_moves = chess_cpp.expand_moves(all_possible_moves, is_promotion)
+        new_splits = get_new_batch_splits(is_promotion, num_moves_per_batch_element)
+        # Keep gradients here
+        expanded_valid_probs = expand_valid_probs(all_boards, valid_probs, is_promotion, val_prom)
+        return expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits
+    else:
+        # No promotions, so this can just be anything.
+        default_promotion = torch.Tensor([[0, 0, 0, 1]]).repeat(is_promotion.shape[0], 1).to(torch.int8).cuda()
+        return copied_boards, all_possible_moves, default_promotion, valid_probs, num_moves_per_batch_element
 
 def convert_jle_to_UCI_notation(move, promotion, single_board, invert):
     assert len(move) == 1  # Only do this in Python for a single batch.

@@ -200,7 +200,7 @@ class TestExpandingMoves(unittest.TestCase):
         flat_moves = move_layer_for_board.reshape((move_layer_for_board.shape[0] * move_layer_for_board.shape[1]))
         legal_moves = torch.where(flat_moves == 1)[0].unsqueeze(1)
         valid_moves = torch.ones((6)).cuda() / 6
-        prom = torch.Tensor([1, 0, 0, 0]).to(torch.float32).cuda()
+        prom = torch.Tensor([[[1, 0, 0, 0]]]).to(torch.float32).cuda().repeat(1, 8, 1)
         num_moves_per_batch_element = [6]
         expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(batched_board, prom, legal_moves, valid_moves, num_moves_per_batch_element)
         assert torch.equal(expanded_promotions, torch.Tensor([

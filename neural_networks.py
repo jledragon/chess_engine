@@ -191,8 +191,7 @@ class Simple2DNetwork(nn.Module):
         nn.init.zeros_(self.y_layer.bias)
 
         self.value_part = value_part
-        # TODO - rethink promotions. They are currently very inefficient with parameters.
-        #self.prom_layer = nn.Linear(8192, 4 * 4096)
+        self.prom_layer = nn.Linear(368, 4 * 8)
         if value_part:
             self.v1_layer = nn.Linear(368, 20)
             self.bn_v1 = nn.BatchNorm1d(20)
@@ -215,8 +214,6 @@ class Simple2DNetwork(nn.Module):
         return self.parameters()
 
     def forward(self, board):
-        promo = torch.tensor([[0, 0, 0, 1]]).repeat(board.shape[0], 1).to(torch.float32).cuda() # Queen
-
         # 3x3 view
         xh_3x3_1 = F.relu(self.bn_c31(self.conv_3_1(board.to(torch.float32))))
         xh_3x3_2 = F.relu(self.bn_c32(self.conv_3_2(xh_3x3_1)))
@@ -248,8 +245,8 @@ class Simple2DNetwork(nn.Module):
         # Features will all levels of view
         xh = torch.cat((xh_3x3, xh_4x4, xh_5x5, xh_6x6, xh_7x7, xh_8x8), axis=1)
         out = self.y_layer(xh)
-        #promo = self.prom_layer(xh3)
-        #promo = promo.reshape(xh2.shape[0], 4096, 4)
+        promo = self.prom_layer(xh)
+        promo = promo.reshape(xh.shape[0], 8, 4)
         if not self.value_part:
             return out, promo
         else:
@@ -530,12 +527,8 @@ class A2CChessNetwork:
         finite_log_probs = torch.isfinite(log_move_probs)
         valid_move_indices = torch.argwhere(finite_log_probs)[:,1:]
         valid_probs = torch.exp(log_move_probs[ml_mask])
-        # TODO - rethink promotions. They are currently too inefficient with NN parameters.
-        # 8x4 encoding "to" column context only would be preferable to 4096x4 encoding full from/to square context
-        #valid_promotion_probs_per_move = out_prom[ml_mask]  # old
-        #val_prom = self.softmax(valid_promotion_probs_per_move)  # old
-        val_prom = out_prom.repeat(valid_probs.shape[0], 1)  # new
-        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(current_board, val_prom, valid_move_indices, valid_probs, num_moves_per_batch_element)
+        softmax_prom = self.softmax(out_prom)
+        expanded_boards, expanded_moves, expanded_promotions, expanded_valid_probs, new_splits = expand_all_moves(current_board, softmax_prom, valid_move_indices, valid_probs, num_moves_per_batch_element)
         all_expanded_moves = []
         all_expanded_promotions = []
         all_expanded_valid_probs = []
@@ -550,7 +543,7 @@ class A2CChessNetwork:
     
     @conditional_compile
     def get_best_opponent_move(self, board, move_layer):
-        # Opponent move for MCTS. Assume promotions to Queens
+        # Opponent move for MCTS
         out_move, out_prom, _ = self.chess_network.forward(board)
         out_prom = out_prom.to(torch.int8)
         ml_mask = move_layer.to(torch.bool).reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2]))
