@@ -12,12 +12,13 @@ from mobile_cvt.MV2Block import MV2Block
 from mobile_cvt.MobileCvTBlock import MobileCvTBlock
 from mobile_cvt.MobileCvT import MobileCvT
 from mobile_cvt.ConvUser import ConvUser
-from chess_py_utils import get_random_move, conditional_compile, expand_all_moves
+from chess_py_utils import get_random_move, conditional_compile, expand_all_moves, get_legal_moves_projection
 from blitz.modules import BayesianLinear, BayesianConv2d
 import chess_cpp
 import os
 from einops.layers.torch import Reduce
 from my_optim import SharedAdamW
+from constants import MCTS_BATCH_SIZE, TRAINING_BATCH_SIZE
 
 
 class ResnetBlockFC(nn.Module):
@@ -113,6 +114,8 @@ class Simple2DNetwork(nn.Module):
         # The 4 conv resnet blocks setup was the best performer of this bunch for the full game.
         # See https://github.com/undera/chess-engine-nn
         super(Simple2DNetwork, self).__init__()
+        self.move_projection = get_legal_moves_projection()
+        self.y_data = torch.ones((max(MCTS_BATCH_SIZE, TRAINING_BATCH_SIZE), 4_096)).cuda()
 
         # 3x3 view
         self.conv_3_1 = nn.Conv2d(6, 8, (3, 3))
@@ -186,7 +189,7 @@ class Simple2DNetwork(nn.Module):
         nn.init.zeros_(self.conv_8_1.bias)
         nn.init.zeros_(self.bn_c81.bias)
 
-        self.y_layer = nn.Linear(368, 4_096)
+        self.y_layer = nn.Linear(368, 1_792)
         nn.init.xavier_uniform_(self.y_layer.weight)
         nn.init.zeros_(self.y_layer.bias)
 
@@ -245,15 +248,17 @@ class Simple2DNetwork(nn.Module):
         # Features will all levels of view
         xh = torch.cat((xh_3x3, xh_4x4, xh_5x5, xh_6x6, xh_7x7, xh_8x8), axis=1)
         out = self.y_layer(xh)
+        y_out = self.y_data[0:out.shape[0]]
+        y_out[:, self.move_projection] = out
         promo = self.prom_layer(xh)
         promo = promo.reshape(xh.shape[0], 8, 4)
         if not self.value_part:
-            return out, promo
+            return y_out, promo
         else:
             hv = F.relu(self.bn_v1(self.v1_layer(xh)))
             v_out = self.v2_layer(hv)
             v = torch.tanh(v_out)
-            return out, promo, v
+            return y_out, promo, v
 
 
 class CvTNetwork(ConvUser):
@@ -570,7 +575,7 @@ class A2CChessNetwork:
             if not len(ap) == 1 and torch.all(torch.isfinite(ap_logits)):
                 # In cases there there was not only one move.
                 valid_batches += 1
-                cross_entropy_total = cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])
+                cross_entropy_total = (cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])).item()
         if valid_batches > 0:
             cross_entropy_mean = cross_entropy_total / valid_batches
         else:

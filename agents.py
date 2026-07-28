@@ -12,7 +12,7 @@ from stockfish import Stockfish
 import platform
 import numpy as np
 from interface import AIMoveAgent, JLEAIMoveAgent
-from constants import BATCH_SIZE, TOTAL_DESIRED_LOGGED_GAMES_A2C, A2C_TRAIN_CADENCE
+from constants import BATCH_SIZE, TOTAL_DESIRED_LOGGED_GAMES_A2C, A2C_TRAIN_CADENCE, MCTS_BATCH_SIZE
 import multiprocessing
 from chess_py_utils import (
     get_random_move,
@@ -25,6 +25,7 @@ from chess_py_utils import (
     get_game_over_message,
     get_game_value_for_white,
     save_full_game_artifacts,
+    flip_states,
     #get_moves_for_player_with_reuse
 )
 
@@ -383,7 +384,7 @@ class MCTSGraph:
         self.model = agent.model
         self.boards = boards
         self.value_mask = torch.tensor([1, 0]).to(torch.float32).cuda()
-        self.batch_size = 256
+        self.batch_size = MCTS_BATCH_SIZE
         self.nodes_marked_for_generation = []
         self.nodes_marked_for_rollout = []
         self.cpuct_base = 19_652
@@ -632,6 +633,7 @@ class A2CGameMemory:
         self.game_value_buffer = torch.empty((0)).to(torch.float32)
         self.training_batch_size = batch_size
         self.once = torch.ones((1)).to(torch.int8)
+        self.augment_data = True
 
     def _append(self, begin, states, mcts_probs, game_val, num_times):
         game_val_template = torch.ones((states.shape[0])).to(torch.float32) * game_val
@@ -667,6 +669,8 @@ class A2CGameMemory:
     def sample_training_batch(self):
         rand_sample_indices = torch.randint(low=0, high=self.state_buffer.shape[0], size=(self.training_batch_size,))
         states = self.state_buffer[rand_sample_indices].cuda()
+        if self.augment_data:
+            states = flip_states(states)
         mcts_probs = [self.mcts_prob_buffer[ind].cuda() / self.num_times_seen[ind].cuda() for ind in rand_sample_indices]
         game_vals = self.game_value_buffer[rand_sample_indices].cuda() / self.num_times_seen[rand_sample_indices].cuda()
         return states, mcts_probs, game_vals
@@ -836,19 +840,19 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
         return major_outcomes, colour_list, states, moves, promotions
 
-    def training_session(self, start_epoch, num_logged_games):
+    def training_session(self, start_epoch, num_logged_games, memory):
         """
         Learn on the data that we have gathered so far.
         """
         self.model.set_train_mode()
-        current_epoch = self.train_on_data(start_epoch)
+        current_epoch = self.model.train_on_data(start_epoch, memory)
         self.update_training_params(num_logged_games)
         self.model.set_test_mode()
         return current_epoch
 
-    def train_on_loaded_data(self):
+    def train_on_loaded_data(self, memory):
         self.model.set_train_mode()
-        self.train_on_data(0)
+        self.model.train_on_data(0, memory)
 
 
 def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):
@@ -882,7 +886,6 @@ def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):
         our_ai_agent.end_episode()
         total_games += 1
         print(total_games)
-    print(f"Wins {our_ai_agent.wins}, Losses {our_ai_agent.losses}")
 
 
 def multi_threaded_a2c_process(proc_num, model, artifacts_dir, board_setup, total_games):

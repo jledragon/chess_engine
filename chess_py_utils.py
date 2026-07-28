@@ -172,6 +172,14 @@ def get_random_move(batched_board, move_layer):
     return random_select, one_hot_promotion
 
 @conditional_compile
+def flip_states(states):
+    indices_to_flip = torch.rand(size=(states.shape[0],)).cuda() > 0.5
+    states_to_flip = states[indices_to_flip]
+    flipped_states = torch.flip(states_to_flip, (3,))
+    states[indices_to_flip] = flipped_states
+    return states
+
+@conditional_compile
 def flip_episode(states, actions, next_states):
     indices_to_flip = torch.rand(size=(states.shape[0],)).cuda() > 0.5
     states_to_flip = states[indices_to_flip]
@@ -353,6 +361,51 @@ def convert_UCI_to_jle_notation(move, invert):
     if len(move) > 4:
         jle_promotion[_promotion_indices[move[4]]] = 1
     return jle_move, jle_promotion
+
+def projection_fn(from_row, from_col, to_row, to_col):
+    return from_row * 8**3 + from_col * 8**2 + to_row * 8 + to_col
+
+def get_diagonal_projections(from_row, from_col, to_row):
+    projections = []
+    diff = from_row - to_row if from_row > to_row else to_row - from_row
+    to_col_1 = from_col - diff
+    to_col_2 = from_col + diff
+    if to_col_1 >= 0:
+        projections.append(projection_fn(from_row, from_col, to_row, to_col_1))
+    if to_col_2 <= 7:
+        projections.append(projection_fn(from_row, from_col, to_row, to_col_2))
+    return projections
+
+def get_legal_moves_projection():
+    # Not all 4,096 moves are legal in chess. This method returns a positional tensor that can be used to populate a 4,096-sized
+    # tensor with all actual, legal moves. This is a shortcut that should only be used with base/vanilla chess on an 8x8 board.
+    positions = []
+    for from_row in range(8):
+        for from_col in range(8):
+            for to_row in range(from_row - 2, from_row + 3):
+                if to_row < 0 or to_row > 7:
+                    continue  # Remove anything that goes out of bounds row-wise
+                for to_col in range(from_col - 2, from_col + 3):
+                    if to_col < 0 or to_col > 7:
+                        continue  # Remove anything that goes out of bounds column-wise
+                    if from_row == to_row and from_col == to_col:
+                        continue  # No piece moves to its own current square.
+                    positions.append(projection_fn(from_row, from_col, to_row, to_col))
+            # Project all rows, columns and diagonals from here to the edge of the board. Skip the
+            # first two squares in all cases, which will be accounted for already by the above code.
+            for to_row in range(from_row - 2):
+                positions.append(projection_fn(from_row, from_col, to_row, from_col))
+                positions += get_diagonal_projections(from_row, from_col, to_row)
+            for to_row in range(from_row + 3, 8):
+                positions.append(projection_fn(from_row, from_col, to_row, from_col))
+                positions += get_diagonal_projections(from_row, from_col, to_row)
+            for to_col in range(from_col - 2):
+                positions.append(projection_fn(from_row, from_col, from_row, to_col))
+            for to_col in range(from_col + 3, 8):
+                positions.append(projection_fn(from_row, from_col, from_row, to_col))
+    positions = torch.Tensor(positions).to(torch.int32).unique().cuda()
+    assert positions.shape[0] == 1_792  # If this is not correct, something has gone wrong in the logic.
+    return positions
 
 def save_full_game_artifacts(artifacts_dir, game_num, states, moves, promotions):
     game_file_name = artifacts_dir / f"game_{str(game_num)}"

@@ -221,13 +221,15 @@ if __name__ == '__main__':
     elif args.algorithm == "A2C":
         model = A2CChessNetwork()
         memory = A2CGameMemory(10_000, 256)
-        our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, args.artifacts_dir)
+        our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
         assert boards.get_batch_size() == 1
-    model.load_models()
     memory.load_data()
     if args.train_further:
+        model.load_models('train')
         #our_ai_agent.analyse_loaded_data_and_models()  # Debugging
-        our_ai_agent.train_on_loaded_data()
+        our_ai_agent.train_on_loaded_data(memory)
+    else:
+        model.load_models('eval')
     our_ai_agent.prepare_for_evaluation()
     if args.eval_opponent == 'Stockfish':
         # TODO - allow any mode for Stockfish
