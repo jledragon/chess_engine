@@ -49,11 +49,11 @@ if __name__ == '__main__':
     print(f"Training with {mode_str} chess games")
     if args.algorithm == "DQN":
         model = DQNChessNetwork()
-        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
+        memory = DQNExperienceBuffer(10_000_000, BATCH_SIZE)
         boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
         batched_board = boards.to_tensor().cuda()
         starting_position = batched_board[0].clone()
-        our_ai_agent = DQNMoveAgent(boards, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+        our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
         train_dqn(args, model, memory, mode)
         # Recommended batch size = 256
     elif args.algorithm == "A2C":

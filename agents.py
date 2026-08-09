@@ -13,7 +13,8 @@ import platform
 import numpy as np
 from interface import AIMoveAgent, JLEAIMoveAgent
 from constants import BATCH_SIZE, TOTAL_DESIRED_LOGGED_GAMES_A2C, A2C_TRAIN_CADENCE, MCTS_BATCH_SIZE
-import multiprocessing
+import torch.multiprocessing as mp
+from neural_networks import A2CChessNetwork
 from chess_py_utils import (
     get_random_move,
     convert_jle_to_UCI_notation,
@@ -85,7 +86,7 @@ class StockfishMoveAgent(AIMoveAgent):
 
 class DQNExperienceBuffer:
     def __init__(self, max_size, batch_size):
-        self.max_size = max_size  # multiplied by batch size.
+        self.max_size = max_size
         self.state_buffer = torch.empty((0, 6, 8, 8)).to(torch.int8)
         self.move_buffer = torch.empty((0, 4)).to(torch.int8)
         self.promotion_buffer = torch.empty((0, 4)).to(torch.int8)
@@ -96,7 +97,7 @@ class DQNExperienceBuffer:
 
     def add_to_buffer(self, state, action, rewards, terminals, next_state):
         move, promotion = action
-        if self.state_buffer.shape[0] > ((self.max_size + 1) * state.shape[0]):
+        if self.state_buffer.shape[0] > self.max_size:
             begin = state.shape[0]
         else:
             begin = 0
@@ -142,7 +143,7 @@ class DQNMoveAgent(JLEAIMoveAgent):
         self.opponent_terminals = None
         self.experience_buffer = memory
         self.q_network = model
-        self.win_reward = 300 # 100
+        self.win_reward = 100 # 100
         self.lose_reward = -100 # -100
         self.move_reward = -1.2 # -1
         self.update_rate = 40 # 40
@@ -201,15 +202,21 @@ class DQNMoveAgent(JLEAIMoveAgent):
 
     @conditional_compile
     def _update_opponent_rewards(self, game_over_tensor, game_state_bundle):
+        # Assumption - the game cannot be over in one move. If it could, and this were the first
+        # move in the next game, then this would interfere with the previous game.
         board_state, opponent_move_layer = game_state_bundle
         if self.opponent_rewards is not None:
             losses_opp = game_over_tensor[:, 0].cpu()
+            other_game_over_opp_turn = torch.any(game_over_tensor[:, 1:], dim=1).cpu()
+            # ^ Yes, even non-positional draws...
             num_moves_reward = -self._move_reward_fn(opponent_move_layer)
             punishment = num_moves_reward.cpu()
             self.opponent_rewards += punishment
             if torch.sum(losses_opp) > 0:
                 self.opponent_terminals[losses_opp] = True
-                self.opponent_rewards[losses_opp] = self.lose_reward
+                self.opponent_rewards[losses_opp] = self.opponent_rewards[losses_opp] + self.lose_reward
+            elif torch.sum(other_game_over_opp_turn) > 0:
+                self.opponent_terminals[other_game_over_opp_turn] = True
     
     def prepare_for_training(self):
         self.q_network.set_train_mode()
@@ -255,15 +262,12 @@ class DQNMoveAgent(JLEAIMoveAgent):
             for group in self.q_network.optimiser.param_groups:
                 group['lr'] = group['lr'] * 0.1
 
-    def self_play_and_training_session(self, boards, start_epoch):
+    def self_play_and_training_session(self, boards, dud_move_count, colour_list, start_epoch, total_games):
         """
         Play an AI against itself and train on past data.
         """
         batched_board = boards.to_tensor().cuda()
-        dud_move_count = boards.get_starting_move_count_list()
-        colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
-        total_games = 0
-        
+
         #now = time.time()
         end_epoch = start_epoch + 100
         for move_num in range(start_epoch, end_epoch):
@@ -277,14 +281,11 @@ class DQNMoveAgent(JLEAIMoveAgent):
             self.store_training_artifacts((current_state, move, promotion, rewards, game_over), opponent_move_layer)
             if move_num >= 100:
                 self.q_network.set_train_mode()
-                self.train_step(move_num)
+                self.train_step(move_num, augment_data=False)
             games_done = torch.sum(game_over.to(torch.int8))
             total_games += games_done
-            print(move_num)
-        #elapsed = time.time() - now
-        #print(elapsed)
-        print(self.q_network.eps, start_epoch)
-        return end_epoch
+        print(self.q_network.eps, start_epoch, total_games.cpu().item())
+        return boards, dud_move_count, colour_list, end_epoch, total_games
 
     def decide_move(self, board_state):
         board_tensor, _, _ = board_state
@@ -307,7 +308,15 @@ def train_dqn(args, model, memory, board_setup):
     our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
     our_ai_agent.prepare_for_training()
     current_epoch = 0
-    our_ai_agent.self_play_and_training_session(current_epoch)
+    total_games = 0
+
+    dud_move_count = boards.get_starting_move_count_list()
+    colour_list = torch.ones((BATCH_SIZE)).to(torch.bool).cuda()
+    for session in range(0, 50):
+        print(f"Starting new batch of 100 moves from {current_epoch}.")
+        boards, dud_move_count, colour_list, current_epoch, total_games = our_ai_agent.self_play_and_training_session(
+            boards, dud_move_count, colour_list, current_epoch, total_games
+        )
 
 
 class MCTSNode:
@@ -633,7 +642,7 @@ class A2CGameMemory:
         self.game_value_buffer = torch.empty((0)).to(torch.float32)
         self.training_batch_size = batch_size
         self.once = torch.ones((1)).to(torch.int8)
-        self.augment_data = True
+        self.augment_data = False
 
     def _append(self, begin, states, mcts_probs, game_val, num_times):
         game_val_template = torch.ones((states.shape[0])).to(torch.float32) * game_val
@@ -888,12 +897,13 @@ def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):
         print(total_games)
 
 
-def multi_threaded_a2c_process(proc_num, model, artifacts_dir, board_setup, total_games):
+def multi_threaded_a2c_process(proc_num, model_state, artifacts_dir, board_setup, total_games):
     print(f"Starting process {proc_num}")
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, board_setup)
     assert boards.get_batch_size() == 1
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
+    model = A2CChessNetwork(model_state=model_state)
     our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
     our_ai_agent.prepare_for_training()
     major_outcomes, colour_list, states, moves, promotions = our_ai_agent.self_play_session()
@@ -913,10 +923,11 @@ def train_multi_threaded_a2c(artifacts_dir, model, memory, board_setup):
     current_training_epoch = 0
     num_processes = 4  # 4 for full, 12 for simplified
     train_inc = 1
-    agent_pool = multiprocessing.Pool(processes=num_processes)
+    agent_pool = mp.Pool(processes=num_processes)
+    current_model_state = None
 
     while num_logged_games < TOTAL_DESIRED_LOGGED_GAMES_A2C:
-        process_inputs = [(i, model, artifacts_dir, board_setup, total_games) for i in range(num_processes)]
+        process_inputs = [(i, current_model_state, artifacts_dir, board_setup, total_games) for i in range(num_processes)]
         process_values = agent_pool.starmap(multi_threaded_a2c_process, process_inputs)
         for (proc_num, major_outcomes, col_list, ws, bs, wp, bp) in process_values:
             if torch.any(major_outcomes):

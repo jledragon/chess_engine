@@ -12,7 +12,7 @@ import torch
 import chess_cpp
 from chess_py_utils import flip_board, is_game_over, get_white_view, get_repetition_status, get_game_over_message
 from visualisation import BoardDrawer
-import PySimpleGUI as sg
+import FreeSimpleGUI as sg
 from pygame import mixer
 import os
 

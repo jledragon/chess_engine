@@ -407,6 +407,24 @@ def get_legal_moves_projection():
     assert positions.shape[0] == 1_792  # If this is not correct, something has gone wrong in the logic.
     return positions
 
+def get_to_and_from_move_contributions(val_moves, action_probs):
+    # For the visualisation. In terms of "to" and "from" moves, return the probabilities of each square,
+    # normalised to sum to 1.
+    to_squares = {}
+    from_squares = {}
+    for row in range(8):
+        for col in range(8):
+            ap_contrib_to = torch.argwhere(torch.logical_and(val_moves[:,2] == row, val_moves[:,3] == col))[:, 0]
+            sq_contrib_to = torch.sum(action_probs[ap_contrib_to]).cpu().item()
+            if ap_contrib_to.shape[0] > 0:
+                to_squares[(row, col)] = sq_contrib_to
+
+            ap_contrib_from = torch.argwhere(torch.logical_and(val_moves[:,0] == row, val_moves[:,1] == col))[:, 0]
+            sq_contrib_from = torch.sum(action_probs[ap_contrib_from]).cpu().item()
+            if ap_contrib_from.shape[0] > 0:
+                from_squares[(row, col)] = sq_contrib_from
+    return to_squares, from_squares
+
 def save_full_game_artifacts(artifacts_dir, game_num, states, moves, promotions):
     game_file_name = artifacts_dir / f"game_{str(game_num)}"
     game_file = game_file_name.with_suffix(".txt")

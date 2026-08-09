@@ -15,14 +15,14 @@ Also from Chess 1.0's Visualisation script.
 import torch
 from enum import Enum
 import os
-import PySimpleGUI as sg
+import FreeSimpleGUI as sg
 import copy
 
 IMAGE_PATH = 'PieceImages'  # path to the chess pieces
 SQ_LIGHT_COLOUR = '#F0D9B5'
 SQ_DARK_COLOUR = '#B58863'
-MOVE_SQ_LIGHT_COLOUR = '#E8E18E'
-MOVE_SQ_DARK_COLOUR = '#B8AF4E'
+MOVE_SQ_LIGHT_COLOUR = '#E8E18E'  # 232, 225, 142
+MOVE_SQ_DARK_COLOUR = '#B8AF4E'  # 184, 175, 78
 
 class PieceNames(Enum):
     EMPTY = 0
@@ -69,12 +69,42 @@ promotables = {
     PieceNames.BLACK_KNIGHT:  torch.Tensor([1, 0, 0, 0]),
 }
 
+def get_to_rgb(contrib, dark_sq):
+    # Start from "move square colour" and get redder
+    base_g = 175 if dark_sq else 225
+    base_b = 78 if dark_sq else 142
+    scaled_contrib_g = base_g * (1 - contrib)
+    scaled_contrib_b = base_b * (1 - contrib)
+    r = 'B8' if dark_sq else 'E8'
+    g = str(hex(int(scaled_contrib_g)))[2:]
+    b = str(hex(int(scaled_contrib_b)))[2:]
+    if len(g) == 1:
+        g = '0' + g
+    if len(b) == 1:
+        b = '0' + b
+    return '#' + r + g + b
+
+def get_from_rgb(contrib, dark_sq):
+    # Start from "move square colour" and get bluer
+    base_r = 184 if dark_sq else 232
+    base_g = 175 if dark_sq else 225
+    scaled_contrib_r = base_r * (1 - contrib)
+    scaled_contrib_g = base_g * (1 - contrib)
+    b = '4E' if dark_sq else '8E'
+    r = str(hex(int(scaled_contrib_r)))[2:]
+    g = str(hex(int(scaled_contrib_g)))[2:]
+    if len(r) == 1:
+        r = '0' + r
+    if len(g) == 1:
+        g = '0' + g
+    return '#' + r + g + b
+
 class BoardDrawer:
     '''
     A class used to create a chessboard GUI
     '''
     
-    def __init__(self, board_tensor, starting_colour):
+    def __init__(self, board_tensor, starting_colour, to_contribs=None, from_contribs=None):
         '''
         Create the window. Set half a second delay between moves.
         '''
@@ -86,16 +116,16 @@ class BoardDrawer:
         self.timeout = 500
         self.psg_board = None
         self.can_move = torch.zeros((8, 8))
-        self.update_board(board_tensor, self.can_move)
+        self.update_board(board_tensor, self.can_move, to_contribs, from_contribs)
 
-    def update_board(self, board_tensor, move_tensor):
+    def update_board(self, board_tensor, move_tensor, to_contribs=None, from_contribs=None):
         '''
         Update the visuals of the board.
         '''
         event, values = self.window.read(timeout=self.timeout)
         self.can_move = move_tensor
         self.psg_board = self.convertBoard(board_tensor)
-        self.redraw_board(self.window)
+        self.redraw_board(self.window, to_contribs, from_contribs)
 
     def render_square(self, image, key, location):
         '''
@@ -225,18 +255,27 @@ class BoardDrawer:
     
         return board_layout
 
-    def redraw_board(self, window):
+    def redraw_board(self, window, to_contribs=None, from_contribs=None):
         '''
         Redraw the board. This should be called after a move is made.
         '''
+        to_contribs = to_contribs if to_contribs else {}
+        from_contribs = from_contribs if from_contribs else {}
+
         for i in range(8):
-            i_view = i if self.colour else 7 - i
+            i_view = i if not self.colour else 7 - i
             for j in range(8):
                 j_view = j if self.colour else 7 - j
-                if self.can_move[7 - i][j] == 1:
-                    colour = MOVE_SQ_DARK_COLOUR if (i_view + j_view) % 2 else MOVE_SQ_LIGHT_COLOUR
+                dark_sq = (i_view + j_view) % 2
+                if self.can_move[i][j] == 1:
+                    colour = MOVE_SQ_DARK_COLOUR if dark_sq else MOVE_SQ_LIGHT_COLOUR
                 else:
-                    colour = SQ_DARK_COLOUR if (i_view + j_view) % 2 else SQ_LIGHT_COLOUR
+                    colour = SQ_DARK_COLOUR if dark_sq else SQ_LIGHT_COLOUR
+                # Override with model/dataset debugging values, if provided.
+                if (i, j) in to_contribs:
+                    colour = get_to_rgb(to_contribs[(i, j)], dark_sq)
+                if (i, j) in from_contribs:
+                    colour = get_from_rgb(from_contribs[(i, j)], dark_sq)
                 piece_image = piece_files[self.psg_board[i_view][j_view]]
                 elem = window[(i_view, j_view)]
                 elem.Update(button_color=('white', colour), image_filename=piece_image,)

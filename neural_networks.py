@@ -18,7 +18,7 @@ import chess_cpp
 import os
 from einops.layers.torch import Reduce
 from my_optim import SharedAdamW
-from constants import MCTS_BATCH_SIZE, TRAINING_BATCH_SIZE
+from constants import MCTS_BATCH_SIZE, TRAINING_BATCH_SIZE, A2C_TRAINING_ITERS, A2C_TRAINING_DELTA
 
 
 class ResnetBlockFC(nn.Module):
@@ -189,12 +189,23 @@ class Simple2DNetwork(nn.Module):
         nn.init.zeros_(self.conv_8_1.bias)
         nn.init.zeros_(self.bn_c81.bias)
 
-        self.y_layer = nn.Linear(368, 1_792)
+        self.xh2 = nn.Linear(368, 1_024)
+        self.bn_xh2 = nn.BatchNorm1d(1_024)
+        self.xh3 = nn.Linear(368, 128)
+        self.bn_xh3 = nn.BatchNorm1d(128)
+        nn.init.xavier_uniform_(self.xh2.weight)
+        nn.init.xavier_uniform_(self.xh3.weight)
+        nn.init.zeros_(self.xh2.bias)
+        nn.init.zeros_(self.xh2.bias)
+        nn.init.ones_(self.bn_xh2.weight)
+        nn.init.ones_(self.bn_xh3.weight)
+
+        self.y_layer = nn.Linear(1_024, 1_792)
         nn.init.xavier_uniform_(self.y_layer.weight)
         nn.init.zeros_(self.y_layer.bias)
 
         self.value_part = value_part
-        self.prom_layer = nn.Linear(368, 4 * 8)
+        self.prom_layer = nn.Linear(128, 4 * 8)
         if value_part:
             self.v1_layer = nn.Linear(368, 20)
             self.bn_v1 = nn.BatchNorm1d(20)
@@ -247,11 +258,13 @@ class Simple2DNetwork(nn.Module):
 
         # Features will all levels of view
         xh = torch.cat((xh_3x3, xh_4x4, xh_5x5, xh_6x6, xh_7x7, xh_8x8), axis=1)
-        out = self.y_layer(xh)
-        y_out = self.y_data[0:out.shape[0]]
+        xh2 = F.relu(self.bn_xh2(self.xh2(xh)))
+        xh3 = F.relu(self.bn_xh3(self.xh3(xh)))
+        out = self.y_layer(xh2)
+        y_out = self.y_data.clone()[0:out.shape[0]]
         y_out[:, self.move_projection] = out
-        promo = self.prom_layer(xh)
-        promo = promo.reshape(xh.shape[0], 8, 4)
+        promo = self.prom_layer(xh3)
+        promo = promo.reshape(xh3.shape[0], 8, 4)
         if not self.value_part:
             return y_out, promo
         else:
@@ -329,14 +342,16 @@ class SimpleLinearNetwork(nn.Module):
 
     def __init__(self, value_part):
         super(SimpleLinearNetwork, self).__init__()
-        self.x_layer = nn.Linear(384, 4096)
-        self.h_layer = nn.Linear(4096, 4096)
-        self.y_layer = nn.Linear(4096, 4096)
-        self.prom_layer = nn.Linear(4096, 4 * 4096)
+        self.x_layer = nn.Linear(384, 4_096)
+        self.h_layer = nn.Linear(4096, 4_096)
+        self.y_layer = nn.Linear(4096, 1_792)
         self.bn_1 = nn.BatchNorm1d(4096)
         self.bn_2 = nn.BatchNorm1d(4096)
-        self.prom_layer = nn.Linear(4096, 4 * 4096)
+        self.prom_layer = nn.Linear(4096, 4 * 8)
         self.value_part = value_part
+        self.move_projection = get_legal_moves_projection()
+        self.y_data = torch.ones((max(MCTS_BATCH_SIZE, TRAINING_BATCH_SIZE), 4_096)).cuda()
+
         nn.init.xavier_uniform_(self.x_layer.weight)
         nn.init.xavier_uniform_(self.h_layer.weight)
         nn.init.xavier_uniform_(self.y_layer.weight)
@@ -362,15 +377,17 @@ class SimpleLinearNetwork(nn.Module):
         xh = F.relu(self.bn_1(self.x_layer(board.to(torch.float32))))
         hh = F.relu(self.bn_2(self.h_layer(xh)))
         out = self.y_layer(hh)
+        y_out = self.y_data.clone()[0:out.shape[0]]
+        y_out[:, self.move_projection] = out
         promo = self.prom_layer(hh)
-        promo = promo.reshape(hh.shape[0], 4096, 4)
+        promo = promo.reshape(hh.shape[0], 8, 4)
         if not self.value_part:
-            return out, promo
+            return y_out, promo
         else:
             hv = F.relu(self.bn_3(self.hidden_v_layer(xh)))
             hv_1 = hv.reshape(hv.shape[0], 512)
             v = torch.tanh(self.v_layer(hv_1))
-            return out, promo, v
+            return y_out, promo, v
 
 
 class DQNChessNetwork:
@@ -379,17 +396,17 @@ class DQNChessNetwork:
         self.prev_eps = self.eps
         self.chess_network = Simple2DNetwork(False).cuda()
         self.qnet_network = Simple2DNetwork(False).cuda()
-        try:
+        #self.chess_network = SimpleLinearNetwork(False).cuda()
+        #self.qnet_network = SimpleLinearNetwork(False).cuda()
+        if os.environ.get('try_compile', 'False').lower() == 'true':
             self.chess_network = torch.compile(self.chess_network)
             self.qnet_network = torch.compile(self.qnet_network)
-        except RuntimeError:
-            print("Warning - compile not supported.")
         self.qnet_network.set_test_mode()
         self.softmax = nn.Softmax(dim=1)
         self.tau = 0.999
         self.discount_factor = 0.99
         self.lr = self.chess_network.lr
-        self.optimiser = torch.optim.AdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)
+        self.optimiser = torch.optim.AdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)  # AdamW
         self.huberLoss_function = nn.SmoothL1Loss()
         #self.MSELoss_function = nn.MSELoss()
         #self.cross_entropy = nn.CrossEntropyLoss()
@@ -408,15 +425,17 @@ class DQNChessNetwork:
     def get_move(self, board, move_layer):
         out_move, out_prom = self.chess_network.forward(board)
         max_filtered_out = self.get_allowed_max(out_move, move_layer)
-        sm_prom = self.softmax(out_prom)
-        max_out_prom = torch.argmax(sm_prom, dim=1)
-        nn_prom = F.one_hot(max_out_prom, num_classes=4).to(torch.int8)
         ft1 = max_filtered_out // 64
         ft2 = max_filtered_out % 64
         f1 = ft1 // 8
         t1 = ft1 % 8
         f2 = ft2 // 8
         t2 = ft2 % 8
+        sm_prom = self.softmax(out_prom)
+        sm_select_2d = torch.index_select(sm_prom, 1, t2[:,0])
+        sm_select = torch.transpose(torch.diagonal(sm_select_2d, dim1=0, dim2=1), 0, 1)
+        max_out_prom = torch.argmax(sm_select, dim=1)
+        nn_prom = F.one_hot(max_out_prom, num_classes=4).to(torch.int8)
         nn_move = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
         random_moves, random_promotions = get_random_move(board, move_layer)
         eps_tensor = torch.rand((board.shape[0])).cuda().unsqueeze(1)
@@ -490,8 +509,12 @@ class DQNChessNetwork:
 
 
 class A2CChessNetwork:
-    def __init__(self):
-        self.chess_network = Simple2DNetwork(True).cuda()
+    def __init__(self, model_state=None):
+        self.chess_network = Simple2DNetwork(True).cpu()
+        if model_state is not None:
+            self.chess_network.load_state_dict(model_state)
+        self.chess_network = self.chess_network.cuda()
+        self.chess_network.share_memory()
         #self.chess_network = SimpleLinearNetwork(True).cuda()
         if os.environ.get('try_compile', 'False').lower() == 'true':
             self.chess_network = torch.compile(self.chess_network)
@@ -505,8 +528,7 @@ class A2CChessNetwork:
         self.gae_lambda = 1.0
         self.entropy_coef = 0.01
         self.value_loss_coef = 2.0
-        self.num_iter_delta = 200
-        self.num_iters_to_train = 400
+        self.num_iters_to_train = A2C_TRAINING_ITERS
 
     @conditional_compile
     def get_move_logits(self, out_move, ml_mask):
@@ -575,13 +597,15 @@ class A2CChessNetwork:
             if not len(ap) == 1 and torch.all(torch.isfinite(ap_logits)):
                 # In cases there there was not only one move.
                 valid_batches += 1
-                cross_entropy_total = (cross_entropy_total + F.cross_entropy(torch.logit(ap), graph_probs[i])).item()
+                # Can use either F.kl_div or F.cross_entropy. Remember to use
+                # logits with cross entropy and ap.log() with KL divergence.
+                cross_entropy_total = cross_entropy_total + F.kl_div(ap.log(), graph_probs[i])
         if valid_batches > 0:
             cross_entropy_mean = cross_entropy_total / valid_batches
         else:
             cross_entropy_mean = 0  # safety
         reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
-        combined_loss = cross_entropy_mean + 5 * reward_loss
+        combined_loss = cross_entropy_mean + reward_loss
         print(f"Cross entropy loss: {cross_entropy_mean}, Reward loss: {reward_loss}")
         self.optimiser.zero_grad()
         combined_loss.backward()
@@ -597,7 +621,7 @@ class A2CChessNetwork:
 
     def update_training_params(self, num_logged_games):
         if self.num_iters_to_train < 2_000:
-            self.num_iters_to_train += self.num_iter_delta
+            self.num_iters_to_train += A2C_TRAINING_DELTA
 
     def training_session(self, start_epoch, num_logged_games, memory):
         """
