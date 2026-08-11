@@ -12,8 +12,8 @@ import torch
 import chess_cpp
 import argparse
 from chess_py_utils import get_mode_str
-from constants import BATCH_SIZE, TRAINING_BATCH_SIZE
-from agents import DQNMoveAgent, DQNExperienceBuffer, A2CGameMemory, train_single_threaded_a2c, train_multi_threaded_a2c, train_dqn
+from constants import BATCH_SIZE, TRAINING_BATCH_SIZE, DQN_USE_STATE_ACTIONS
+from agents import DQNExperienceBuffer, A2CGameMemory, train_single_threaded_a2c, train_multi_threaded_a2c, train_dqn
 from neural_networks import DQNChessNetwork, A2CChessNetwork
 from datetime import datetime as dt
 from pathlib import Path
@@ -48,13 +48,12 @@ if __name__ == '__main__':
     mode_str = get_mode_str(mode)
     print(f"Training with {mode_str} chess games")
     if args.algorithm == "DQN":
-        model = DQNChessNetwork()
-        memory = DQNExperienceBuffer(10_000_000, BATCH_SIZE)
+        model = DQNChessNetwork(DQN_USE_STATE_ACTIONS)
+        memory = DQNExperienceBuffer(10_000_000, BATCH_SIZE, DQN_USE_STATE_ACTIONS)
         boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, mode)
         batched_board = boards.to_tensor().cuda()
         starting_position = batched_board[0].clone()
-        our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
-        train_dqn(args, model, memory, mode)
+        train_dqn(args, model, memory, mode, DQN_USE_STATE_ACTIONS)
         # Recommended batch size = 256
     elif args.algorithm == "A2C":
         model = A2CChessNetwork()

@@ -12,7 +12,14 @@ from mobile_cvt.MV2Block import MV2Block
 from mobile_cvt.MobileCvTBlock import MobileCvTBlock
 from mobile_cvt.MobileCvT import MobileCvT
 from mobile_cvt.ConvUser import ConvUser
-from chess_py_utils import get_random_move, conditional_compile, expand_all_moves, get_legal_moves_projection
+from chess_py_utils import (
+    get_random_move,
+    conditional_compile,
+    expand_all_moves,
+    get_legal_moves_projection,
+    expand_all_board_encodings,
+    get_max_state_actions
+)
 from blitz.modules import BayesianLinear, BayesianConv2d
 import chess_cpp
 import os
@@ -110,12 +117,14 @@ class Simple2DNetwork(nn.Module):
     CNN with resnets. Performs reasonably well.
     """
     
-    def __init__(self, value_part):
+    def __init__(self, value_part, use_state_actions):
         # The 4 conv resnet blocks setup was the best performer of this bunch for the full game.
         # See https://github.com/undera/chess-engine-nn
         super(Simple2DNetwork, self).__init__()
         self.move_projection = get_legal_moves_projection()
         self.y_data = torch.ones((max(MCTS_BATCH_SIZE, TRAINING_BATCH_SIZE), 4_096)).cuda()
+        self.always_queen = torch.Tensor([1, 0, 0, 0]).to(torch.int8).cuda()
+        self.use_state_actions = use_state_actions
 
         # 3x3 view
         self.conv_3_1 = nn.Conv2d(6, 8, (3, 3))
@@ -189,18 +198,22 @@ class Simple2DNetwork(nn.Module):
         nn.init.zeros_(self.conv_8_1.bias)
         nn.init.zeros_(self.bn_c81.bias)
 
-        self.xh2 = nn.Linear(368, 1_024)
-        self.bn_xh2 = nn.BatchNorm1d(1_024)
-        self.xh3 = nn.Linear(368, 128)
-        self.bn_xh3 = nn.BatchNorm1d(128)
+        if self.use_state_actions:
+            self.xh2 = nn.Linear(400, 400)
+            self.bn_xh2 = nn.BatchNorm1d(400)
+            self.y_layer = nn.Linear(400, 1)
+        else:
+            self.xh2 = nn.Linear(368, 1_024)
+            self.bn_xh2 = nn.BatchNorm1d(1_024)
+            self.xh3 = nn.Linear(368, 128)
+            self.bn_xh3 = nn.BatchNorm1d(128)
+            self.y_layer = nn.Linear(1_024, 1_792)
+            nn.init.xavier_uniform_(self.xh3.weight)
+            nn.init.zeros_(self.xh3.bias)
+            nn.init.ones_(self.bn_xh3.weight)
         nn.init.xavier_uniform_(self.xh2.weight)
-        nn.init.xavier_uniform_(self.xh3.weight)
-        nn.init.zeros_(self.xh2.bias)
         nn.init.zeros_(self.xh2.bias)
         nn.init.ones_(self.bn_xh2.weight)
-        nn.init.ones_(self.bn_xh3.weight)
-
-        self.y_layer = nn.Linear(1_024, 1_792)
         nn.init.xavier_uniform_(self.y_layer.weight)
         nn.init.zeros_(self.y_layer.bias)
 
@@ -228,6 +241,23 @@ class Simple2DNetwork(nn.Module):
         return self.parameters()
 
     def forward(self, board):
+        board_encoding = self.get_board_encoding(board)
+        xh2 = F.relu(self.bn_xh2(self.xh2(board_encoding)))  # Main output
+        xh3 = F.relu(self.bn_xh3(self.xh3(board_encoding)))  # Promotions
+        out = self.y_layer(xh2)
+        y_out = self.y_data.clone()[0:out.shape[0]]
+        y_out[:, self.move_projection] = out
+        promo = self.prom_layer(xh3)
+        promo = promo.reshape(xh3.shape[0], 8, 4)
+        if not self.value_part:
+            return y_out, promo
+        else:
+            hv = F.relu(self.bn_v1(self.v1_layer(board_encoding)))  # Value
+            v_out = self.v2_layer(hv)
+            v = torch.tanh(v_out)
+            return y_out, promo, v
+
+    def get_board_encoding(self, board):
         # 3x3 view
         xh_3x3_1 = F.relu(self.bn_c31(self.conv_3_1(board.to(torch.float32))))
         xh_3x3_2 = F.relu(self.bn_c32(self.conv_3_2(xh_3x3_1)))
@@ -258,20 +288,14 @@ class Simple2DNetwork(nn.Module):
 
         # Features will all levels of view
         xh = torch.cat((xh_3x3, xh_4x4, xh_5x5, xh_6x6, xh_7x7, xh_8x8), axis=1)
-        xh2 = F.relu(self.bn_xh2(self.xh2(xh)))
-        xh3 = F.relu(self.bn_xh3(self.xh3(xh)))
+        return xh
+
+    def decode_state_action(self, state_actions):
+        assert self.use_state_actions, "Only use this if using states and actions together."
+        xh2 = F.relu(self.bn_xh2(self.xh2(state_actions)))  # Main output
         out = self.y_layer(xh2)
-        y_out = self.y_data.clone()[0:out.shape[0]]
-        y_out[:, self.move_projection] = out
-        promo = self.prom_layer(xh3)
-        promo = promo.reshape(xh3.shape[0], 8, 4)
-        if not self.value_part:
-            return y_out, promo
-        else:
-            hv = F.relu(self.bn_v1(self.v1_layer(xh)))
-            v_out = self.v2_layer(hv)
-            v = torch.tanh(v_out)
-            return y_out, promo, v
+        # TODO - deal with promotions correctly.
+        return out, self.always_queen
 
 
 class CvTNetwork(ConvUser):
@@ -391,11 +415,11 @@ class SimpleLinearNetwork(nn.Module):
 
 
 class DQNChessNetwork:
-    def __init__(self):
+    def __init__(self, use_state_actions):
         self.eps = 0.9
         self.prev_eps = self.eps
-        self.chess_network = Simple2DNetwork(False).cuda()
-        self.qnet_network = Simple2DNetwork(False).cuda()
+        self.chess_network = Simple2DNetwork(value_part=False, use_state_actions=use_state_actions).cuda()
+        self.qnet_network = Simple2DNetwork(value_part=False, use_state_actions=use_state_actions).cuda()
         #self.chess_network = SimpleLinearNetwork(False).cuda()
         #self.qnet_network = SimpleLinearNetwork(False).cuda()
         if os.environ.get('try_compile', 'False').lower() == 'true':
@@ -408,6 +432,7 @@ class DQNChessNetwork:
         self.lr = self.chess_network.lr
         self.optimiser = torch.optim.AdamW(self.chess_network.get_parameters(), lr=self.lr, weight_decay=1e-5, amsgrad=True)  # AdamW
         self.huberLoss_function = nn.SmoothL1Loss()
+        self.use_state_actions = use_state_actions
         #self.MSELoss_function = nn.MSELoss()
         #self.cross_entropy = nn.CrossEntropyLoss()
     
@@ -422,7 +447,7 @@ class DQNChessNetwork:
         max_filtered_out = torch.argmax(sm_filtered_out, dim=1, keepdim=True)
         return max_filtered_out
     
-    def get_move(self, board, move_layer):
+    def get_move_state_only(self, board, move_layer):
         out_move, out_prom = self.chess_network.forward(board)
         max_filtered_out = self.get_allowed_max(out_move, move_layer)
         ft1 = max_filtered_out // 64
@@ -451,19 +476,61 @@ class DQNChessNetwork:
         )
         return eps_accounted_moves, eps_accounted_promotions
 
-    def update_network(self, states, actions, rewards, terminals, next_states):
-        moves, promotions = actions
+    def encode_state_actions(self, encodings, nn_moves):
+        one_hot_moves = F.one_hot(nn_moves.to(torch.long), num_classes=8).to(torch.int8)
+        one_hot_moves_flat = torch.reshape(one_hot_moves, (one_hot_moves.shape[0], 32))
+        state_actions = torch.cat((encodings, one_hot_moves_flat), dim=1)
+        return state_actions
+
+    def get_move_state_action(self, board, move_layer):
+        board_encoding = self.chess_network.get_board_encoding(board)
+        flat_ml = move_layer.reshape((move_layer.shape[0], move_layer.shape[1] * move_layer.shape[2])).to(torch.bool)
+        legal_moves = torch.argwhere(flat_ml)[:,1:]
+        ft1 = legal_moves // 64
+        ft2 = legal_moves % 64
+        f1 = ft1 // 8
+        t1 = ft1 % 8
+        f2 = ft2 // 8
+        t2 = ft2 % 8
+        nn_moves = torch.cat((f1, t1, f2, t2), dim=1).to(torch.int8)
+        num_moves_per_batch_element = torch.sum(move_layer, dim=(1,2), dtype=torch.int32)
+        copied_board_encs = expand_all_board_encodings(board_encoding, num_moves_per_batch_element)
+        state_actions = self.encode_state_actions(copied_board_encs, nn_moves)
+        # TODO - we may need to batch this if batch sizes get too large or the decoder uses a lot of parameters.
+        values_per_state_action, promo_ = self.chess_network.decode_state_action(state_actions)
+        max_state_actions = get_max_state_actions(values_per_state_action, nn_moves, num_moves_per_batch_element)
+        promo = torch.unsqueeze(promo_, 0).repeat(board.shape[0], 1)  # TODO - Add eps to this too.
+        random_moves, random_promotions = get_random_move(board, move_layer)
+        eps_tensor = torch.rand((board.shape[0])).cuda().unsqueeze(1)
+        eps_accounted_moves = torch.where(
+            eps_tensor > self.eps,
+            max_state_actions,
+            random_moves
+        )
+        return eps_accounted_moves, promo
+
+    def update_network(self, states, actions, rewards, terminals, next_states, next_actions):
+        moves, _ = actions
         moves = moves.to(torch.long)
         rewards = rewards.to(torch.float32)
-        flat_moves = (moves[:,0] * 8 + moves[:,1]) * 64 + moves[:,2] * 8 + moves[:,3]
-        qs, _ = self.chess_network.forward(states)
-        qsa = torch.gather(qs, 1, flat_moves.unsqueeze(1))
-        qs_next, _ = self.qnet_network.forward(next_states)
-        # It is better all around to compute the move_layer yet again, rather than storing this huge value in the experience buffer.
-        move_layer = chess_cpp.get_moves_for_player(next_states)
-        max_next = self.get_allowed_max(qs_next, move_layer)
-        qsa_next = torch.gather(qs_next, 1, max_next)
         not_terminals = 1 - terminals
+        if self.use_state_actions:
+            next_moves, _ = next_actions
+            board_encoding = self.chess_network.get_board_encoding(states)
+            next_board_encoding = self.qnet_network.get_board_encoding(next_states)
+            enc = self.encode_state_actions(board_encoding, moves)
+            qsa, _ = self.chess_network.decode_state_action(enc)
+            next_enc = self.encode_state_actions(next_board_encoding, next_moves)
+            qsa_next, _ = self.qnet_network.decode_state_action(next_enc)
+        else:
+            flat_moves = (moves[:,0] * 8 + moves[:,1]) * 64 + moves[:,2] * 8 + moves[:,3]
+            qs, _ = self.chess_network.forward(states)
+            qsa = torch.gather(qs, 1, flat_moves.unsqueeze(1))
+            qs_next, _ = self.qnet_network.forward(next_states)
+            # It is better all around to compute the move_layer yet again, rather than storing this huge value in the experience buffer.
+            move_layer = chess_cpp.get_moves_for_player(next_states)
+            max_next = self.get_allowed_max(qs_next, move_layer)
+            qsa_next = torch.gather(qs_next, 1, max_next)
         qsa_next_target = rewards.unsqueeze(1) + not_terminals.unsqueeze(1) * self.discount_factor * qsa_next
         loss_targ = qsa_next_target.detach()
         q_network_loss = self.huberLoss_function(qsa, loss_targ)
@@ -472,13 +539,10 @@ class DQNChessNetwork:
         torch.nn.utils.clip_grad_value_(self.chess_network.parameters(), 100)
         # torch.nn.utils.clip_grad_norm_(self.chess_network.parameters(), 0.1)  # Alternative.
         self.optimiser.step()
-        
-    
+
     def soft_target_update(self):
-        network_params = self.chess_network.get_parameters()
-        target_params = self.qnet_network.get_parameters()
-        for net_params, targ_params in zip(network_params, target_params):
-            targ_params.data.copy_(targ_params.data * self.tau + net_params.data * (1 - self.tau))
+        for net_params, target_net_params in zip(self.chess_network.parameters(), self.qnet_network.parameters()):
+            target_net_params.data.copy_(net_params.data * (1 - self.tau) + target_net_params.data * self.tau)
     
     def set_train_mode(self):
         self.chess_network.set_train_mode()
@@ -592,6 +656,19 @@ class A2CChessNetwork:
         cross_entropy_total = 0
         _, _, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
         valid_batches = 0
+
+        """
+        # TODO - incorporate this.
+        # Policy loss: cross-entropy between predicted and target policy
+        loss_p = -(batch_pi * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
+
+        # Value loss: MSE between predicted and target value
+        loss_v = F.mse_loss(val, batch_z)
+
+        # KL divergence regularization to prevent overconfident predictions
+        kl_loss = F.kl_div(F.log_softmax(logits, dim=1), batch_pi, reduction='batchmean')
+        """
+
         for i, ap in enumerate(action_probs):
             ap_logits = torch.logit(ap)
             if not len(ap) == 1 and torch.all(torch.isfinite(ap_logits)):

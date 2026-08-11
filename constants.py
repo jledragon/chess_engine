@@ -39,3 +39,12 @@ A2C_TRAINING_DELTA = 200
 """
 How much to increase the number of training steps for A2C after more data comes in.
 """
+
+DQN_USE_STATE_ACTIONS = False
+"""
+Indicates which of the two modes to run DQN in. These affect what a 'state' is:
+
+False - A state is the board only. The neural network returns a value for every possible action.
+True - A state is the board + the action. The neural network returns a single value.
+    Every state/action combo should be run through the network.
+"""

@@ -15,6 +15,7 @@ from interface import AIMoveAgent, JLEAIMoveAgent
 from constants import BATCH_SIZE, TOTAL_DESIRED_LOGGED_GAMES_A2C, A2C_TRAIN_CADENCE, MCTS_BATCH_SIZE
 import torch.multiprocessing as mp
 from neural_networks import A2CChessNetwork
+from dqn_util import evaluate_dqn_against_random
 from chess_py_utils import (
     get_random_move,
     convert_jle_to_UCI_notation,
@@ -85,7 +86,7 @@ class StockfishMoveAgent(AIMoveAgent):
 
 
 class DQNExperienceBuffer:
-    def __init__(self, max_size, batch_size):
+    def __init__(self, max_size, batch_size, use_state_actions):
         self.max_size = max_size
         self.state_buffer = torch.empty((0, 6, 8, 8)).to(torch.int8)
         self.move_buffer = torch.empty((0, 4)).to(torch.int8)
@@ -93,10 +94,14 @@ class DQNExperienceBuffer:
         self.rewards_buffer = torch.empty((0)).to(torch.int8)
         self.terminals_buffer = torch.empty((0)).to(torch.int8)
         self.next_state_buffer = torch.empty((0, 6, 8, 8)).to(torch.int8)
+        self.next_move_buffer = torch.empty((0, 4)).to(torch.int8)
+        self.next_promotion_buffer = torch.empty((0, 4)).to(torch.int8)
         self.training_batch_size = batch_size
+        self.use_state_actions = use_state_actions
 
-    def add_to_buffer(self, state, action, rewards, terminals, next_state):
+    def add_to_buffer(self, state, action, rewards, terminals, next_state, next_action):
         move, promotion = action
+        next_move, next_promotion = next_action
         if self.state_buffer.shape[0] > self.max_size:
             begin = state.shape[0]
         else:
@@ -107,7 +112,10 @@ class DQNExperienceBuffer:
         self.rewards_buffer = torch.cat((self.rewards_buffer[begin:], rewards), dim=0)
         self.terminals_buffer = torch.cat((self.terminals_buffer[begin:], terminals), dim=0)
         self.next_state_buffer = torch.cat((self.next_state_buffer[begin:], next_state), dim=0)
-    
+        if self.use_state_actions:
+            self.next_move_buffer = torch.cat((self.next_move_buffer[begin:], next_move), dim=0)
+            self.next_promotion_buffer = torch.cat((self.next_promotion_buffer[begin:], next_promotion), dim=0)
+
     def sample_training_batch(self):
         rand_sample_indices = torch.randint(low=0, high=self.state_buffer.shape[0], size=(self.training_batch_size,))
         states = self.state_buffer[rand_sample_indices].cuda()
@@ -116,7 +124,13 @@ class DQNExperienceBuffer:
         rewards = self.rewards_buffer[rand_sample_indices].cuda()
         terminals = self.terminals_buffer[rand_sample_indices].cuda()
         next_states = self.next_state_buffer[rand_sample_indices].cuda()
-        return states, (moves, promotions), rewards, terminals, next_states
+        if self.use_state_actions:
+            next_moves = self.next_move_buffer[rand_sample_indices].cuda()
+            next_promotions = self.next_promotion_buffer[rand_sample_indices].cuda()
+            next_action = (next_moves, next_promotions)
+        else:
+            next_action = None
+        return states, (moves, promotions), rewards, terminals, next_states, next_action
 
     def save_data(self):
         pass  # TODO
@@ -130,7 +144,7 @@ class DQNMoveAgent(JLEAIMoveAgent):
     A neural network, reinforcement learning-based algorithm to choose moves.
     """
 
-    def __init__(self, boards, model, memory, starting_position, enabled_optional_rewards):
+    def __init__(self, boards, model, memory, starting_position, enabled_optional_rewards, use_state_actions):
         self.boards = boards
         self.starting_position = starting_position
         self.previous_state = None
@@ -143,13 +157,14 @@ class DQNMoveAgent(JLEAIMoveAgent):
         self.opponent_terminals = None
         self.experience_buffer = memory
         self.q_network = model
-        self.win_reward = 100 # 100
-        self.lose_reward = -100 # -100
-        self.move_reward = -1.2 # -1
+        self.win_reward = 1 # 100
+        self.lose_reward = -1 # -100
+        self.move_reward = -0.05 # -1
         self.update_rate = 40 # 40
         self.move_reward_factor = 6 # 6
         self.enabled_optional_rewards = enabled_optional_rewards
-    
+        self.use_state_actions = use_state_actions
+
     @conditional_compile
     def _firepower_score_fn(self, board_state):
         if "firepower" in self.enabled_optional_rewards:
@@ -240,18 +255,18 @@ class DQNMoveAgent(JLEAIMoveAgent):
     def store_training_artifacts(self, dqn_store_bundle, opponent_move_layer):
         current_state, move, promotion, rewards, game_over = dqn_store_bundle
         if self.previous_state is not None:
-            self.experience_buffer.add_to_buffer(self.previous_state, self.previous_action, self.previous_rewards, self.previous_terminals, current_state[:,:6,:,:].cpu())
+            self.experience_buffer.add_to_buffer(self.previous_state, self.previous_action, self.previous_rewards, self.previous_terminals, current_state[:,:6,:,:].cpu(), (move.cpu(), promotion.cpu()))
         # Store state, actions, rewards and terminals for the next pass
         self.store_current_artifacts(current_state[:,:6,:,:].cpu(), (move.cpu(), promotion.cpu()), (rewards.cpu()), game_over.cpu())
     
     def train_step(self, epoch, augment_data=True):
         for update in range(0, self.update_rate):
-            states, actions, rewards, terminals, next_states = self.experience_buffer.sample_training_batch()
+            states, actions, rewards, terminals, next_states, next_actions = self.experience_buffer.sample_training_batch()
             if augment_data:
                 # Doubles our data by flipping horizontally, which is always invariant for this chess setup.
-                states, actions, next_states = flip_episode(states, actions, next_states)
+                states, actions, next_states, next_actions = flip_episode(states, actions, next_states, next_actions)
             # TODO - randomly augment data by flipping horizontally
-            self.q_network.update_network(states, actions, rewards, terminals, next_states)
+            self.q_network.update_network(states, actions, rewards, terminals, next_states, next_actions)
             self.q_network.soft_target_update()
         # Training strategy here
         if self.q_network.eps > 0.05:
@@ -267,6 +282,10 @@ class DQNMoveAgent(JLEAIMoveAgent):
         Play an AI against itself and train on past data.
         """
         batched_board = boards.to_tensor().cuda()
+        # Run evaluation against random. Gives us an indicator of how training is going - future: Make this configurable.
+        starting_position = batched_board[0].clone()
+        random_agent = RandomMoveAgent(boards, starting_position)
+        evaluate_dqn_against_random(boards, random_agent, self)
 
         #now = time.time()
         end_epoch = start_epoch + 100
@@ -292,20 +311,23 @@ class DQNMoveAgent(JLEAIMoveAgent):
         # Get the moves
         move_layer = chess_cpp.get_moves_for_player(board_tensor)
         # Choose a move
-        dqn_move, dqn_promotion = self.q_network.get_move(board_tensor[:,:6,:,:], move_layer)
+        if self.use_state_actions:
+            dqn_move, dqn_promotion = self.q_network.get_move_state_action(board_tensor[:,:6,:,:], move_layer)
+        else:
+            dqn_move, dqn_promotion = self.q_network.get_move_state_only(board_tensor[:,:6,:,:], move_layer)
         return (dqn_move, dqn_promotion)
     
     def load_all_models(self):
         self.q_network.load_models('train')
 
 
-def train_dqn(args, model, memory, board_setup):
+def train_dqn(args, model, memory, board_setup, use_state_actions):
     boards = chess_cpp.BatchedBoard(True, BATCH_SIZE, board_setup)
     assert boards.get_batch_size() > 32
     # Recommended batch size = 256, min. 32.
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
-    our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
+    our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {}, use_state_actions)  # {"firepower", "firepower_per_num_moves"}
     our_ai_agent.prepare_for_training()
     current_epoch = 0
     total_games = 0

@@ -180,7 +180,7 @@ def flip_states(states):
     return states
 
 @conditional_compile
-def flip_episode(states, actions, next_states):
+def flip_episode(states, actions, next_states, next_actions=None):
     indices_to_flip = torch.rand(size=(states.shape[0],)).cuda() > 0.5
     states_to_flip = states[indices_to_flip]
     flipped_states = torch.flip(states_to_flip, (3,))
@@ -194,7 +194,16 @@ def flip_episode(states, actions, next_states):
     states[indices_to_flip] = flipped_states
     action_move[indices_to_flip] = flipped_actions
     next_states[indices_to_flip] = flipped_next_states
-    return states, (action_move, actions[1]), next_states
+    if next_actions is not None:
+        next_action_move = next_actions[0].clone()
+        next_actions_to_flip = next_action_move[indices_to_flip]
+        next_actions_to_flip[:,1] = 7 - next_actions_to_flip[:,1]
+        next_actions_to_flip[:,3] = 7 - next_actions_to_flip[:,3]
+        flipped_next_actions = next_actions_to_flip
+        next_action_move[indices_to_flip] = flipped_next_actions
+        return states, (action_move, actions[1]), next_states, (next_action_move, next_actions[1])
+    else:
+        return states, (action_move, actions[1]), next_states
 
 @conditional_compile
 def get_firepower_score(batched_board, for_opponent):
@@ -289,6 +298,27 @@ def expand_all_boards(all_boards, num_moves_per_batch_element):
         all_expanded_boards.append(all_boards[board_i].unsqueeze(0).repeat(num_moves_per_batch_element[board_i], 1, 1, 1))
     all_expanded_boards = torch.cat(all_expanded_boards, axis=0)
     return all_expanded_boards
+
+@conditional_compile
+def expand_all_board_encodings(all_board_encs, num_moves_per_batch_element):
+    all_expanded_board_encs = []
+    for board_i in range(all_board_encs.shape[0]):
+        # Very similar to the above method.
+        all_expanded_board_encs.append(all_board_encs[board_i].unsqueeze(0).repeat(num_moves_per_batch_element[board_i], 1))
+    all_expanded_boards = torch.cat(all_expanded_board_encs, axis=0)
+    return all_expanded_boards
+
+@conditional_compile
+def get_max_state_actions(state_action_values, nn_moves, num_moves_per_batch_element):
+    max_state_actions = []
+    total = 0
+    for b_num in num_moves_per_batch_element:
+        values_for_batch = state_action_values[total:total+b_num, :]
+        max_in_batch = torch.argmax(values_for_batch)
+        max_state_actions.append(nn_moves[total+max_in_batch:total+max_in_batch+1])
+        total += b_num
+    max_state_actions = torch.cat(max_state_actions, axis=0)
+    return max_state_actions
 
 @conditional_compile
 def get_new_batch_splits(is_promotion, num_moves_per_batch_element):
