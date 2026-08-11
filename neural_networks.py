@@ -574,7 +574,7 @@ class DQNChessNetwork:
 
 class A2CChessNetwork:
     def __init__(self, model_state=None):
-        self.chess_network = Simple2DNetwork(True).cpu()
+        self.chess_network = Simple2DNetwork(True, use_state_actions=False).cpu()
         if model_state is not None:
             self.chess_network.load_state_dict(model_state)
         self.chess_network = self.chess_network.cuda()
@@ -631,6 +631,21 @@ class A2CChessNetwork:
             all_expanded_valid_probs.append(expanded_valid_probs[total:total+split])
             total += split
         return all_expanded_moves, all_expanded_promotions, all_expanded_valid_probs
+
+    @conditional_compile
+    def get_simple_max_moves(self, state):
+        pred_act, pred_prom, pred_value = self.get_model_move_and_state(state[:,:6,:,:])
+        move_layer = chess_cpp.get_moves_for_player(state)
+        valid_actions, valid_promotions, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
+        max_actions = []
+        max_proms = []
+        for i, ap in enumerate(action_probs):
+            max_ap = torch.argmax(action_probs[i])
+            max_actions.append(valid_actions[i][max_ap:max_ap+1])
+            max_proms.append(valid_promotions[i][max_ap:max_ap+1])
+        max_actions = torch.cat(max_actions)
+        max_proms = torch.cat(max_proms)
+        return max_actions, max_proms
     
     @conditional_compile
     def get_best_opponent_move(self, board, move_layer):

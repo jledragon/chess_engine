@@ -10,9 +10,14 @@ from chess_py_utils import conditional_compile
 
 
 @conditional_compile
-def evaluate_dqn_against_random(boards, random_agent, our_ai_agent):
+def evaluate_agent_against_random(boards, random_agent, our_ai_agent):
     """
-    Play an DQN AI against random, to test whether a new training algorithm is working.
+    Play an AI against random, to test whether a new training algorithm is working.
+
+    - With DQN, this just works with DQN as it is.
+    - With A2C, this works with a non-MCTS version, as running A2C with MCTS would be
+        intractible with 800 simulations per move. Here, we just select the best action
+        directly from one network forward pass.
     """
     boards.update_batch_size(256)
     batched_board = boards.to_tensor().cuda()

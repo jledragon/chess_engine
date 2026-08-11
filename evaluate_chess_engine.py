@@ -11,9 +11,9 @@ Run this file with environment "jle".
 import torch
 import argparse
 from random import random
-from dqn_util import evaluate_dqn_against_random
+from eval_util import evaluate_agent_against_random
 from chess_py_utils import flip_board, get_mode_str
-from constants import BATCH_SIZE
+from constants import BATCH_SIZE, DQN_USE_STATE_ACTIONS
 import chess_cpp
 from agents import StockfishMoveAgent, RandomMoveAgent, DQNMoveAgent, A2CMoveAgent, DQNExperienceBuffer, A2CGameMemory
 from neural_networks import DQNChessNetwork, A2CChessNetwork
@@ -73,6 +73,7 @@ def evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent):
 def evaluate_a2c_against_random(boards, random_agent, our_ai_agent):
     """
     Evaluate an A2C AI against random, to test whether training is working.
+    This version uses the full MCTS with 800 simulations per turn for A2C.
     """
     boards.update_batch_size(1)
 
@@ -143,7 +144,7 @@ def get_args():
         'algorithm',
         type=str,
         default="DQN",
-        choices=["DQN", "A2C"],
+        choices=["DQN", "A2C", "A2C-no-MCTS"],
         help="The algorithm of the model we're trying to evaluate."
     )
     parser.add_argument(
@@ -180,15 +181,20 @@ if __name__ == '__main__':
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
     if args.algorithm == "DQN":
-        model = DQNChessNetwork()
-        memory = DQNExperienceBuffer(10_000, BATCH_SIZE)
-        our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {})  # {"firepower", "firepower_per_num_moves"}
-        # Recommended batch size = 256
+        model = DQNChessNetwork(DQN_USE_STATE_ACTIONS)
+        memory = DQNExperienceBuffer(10_000, BATCH_SIZE, DQN_USE_STATE_ACTIONS)
+        our_ai_agent = DQNMoveAgent(boards, model, memory, starting_position, {}, DQN_USE_STATE_ACTIONS)  # {"firepower", "firepower_per_num_moves"}
+        assert boards.get_batch_size() == 256
     elif args.algorithm == "A2C":
         model = A2CChessNetwork()
         memory = A2CGameMemory(10_000, 256)
-        our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
+        our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, True)
         assert boards.get_batch_size() == 1
+    elif args.algorithm == "A2C-no-MCTS":
+        model = A2CChessNetwork()
+        memory = A2CGameMemory(10_000, 256)
+        our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, False)
+        assert boards.get_batch_size() == 256
     memory.load_data()
     if args.train_further:
         model.load_models('train')
@@ -197,13 +203,18 @@ if __name__ == '__main__':
     else:
         model.load_models('eval')
     our_ai_agent.prepare_for_evaluation()
-    if args.eval_opponent == 'Stockfish':
+    if args.eval_opponent == 'Stockfish' and args.algorithm == 'A2C-no-MCTS':
+        raise NotImplementedError("Playing Stockfish without MCTS against Stockfish is not yet implemented.")
+    elif args.eval_opponent == 'Stockfish':
         # TODO - allow any mode for Stockfish
         stockfish_agent = StockfishMoveAgent(boards, starting_position)
         evaluate_against_stockfish(boards, stockfish_agent, our_ai_agent)
     elif args.eval_opponent == 'random' and args.algorithm == 'DQN':
         random_agent = RandomMoveAgent(boards, starting_position)
-        evaluate_dqn_against_random(boards, random_agent, our_ai_agent)
+        evaluate_agent_against_random(boards, random_agent, our_ai_agent)
     elif args.eval_opponent == 'random' and args.algorithm == 'A2C':
         random_agent = RandomMoveAgent(boards, starting_position)
         evaluate_a2c_against_random(boards, random_agent, our_ai_agent)
+    elif args.eval_opponent == 'random' and args.algorithm == 'A2C-no-MCTS':
+        random_agent = RandomMoveAgent(boards, starting_position)
+        evaluate_agent_against_random(boards, random_agent, our_ai_agent)

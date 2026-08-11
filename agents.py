@@ -15,7 +15,7 @@ from interface import AIMoveAgent, JLEAIMoveAgent
 from constants import BATCH_SIZE, TOTAL_DESIRED_LOGGED_GAMES_A2C, A2C_TRAIN_CADENCE, MCTS_BATCH_SIZE
 import torch.multiprocessing as mp
 from neural_networks import A2CChessNetwork
-from dqn_util import evaluate_dqn_against_random
+from eval_util import evaluate_agent_against_random
 from chess_py_utils import (
     get_random_move,
     convert_jle_to_UCI_notation,
@@ -285,7 +285,7 @@ class DQNMoveAgent(JLEAIMoveAgent):
         # Run evaluation against random. Gives us an indicator of how training is going - future: Make this configurable.
         starting_position = batched_board[0].clone()
         random_agent = RandomMoveAgent(boards, starting_position)
-        evaluate_dqn_against_random(boards, random_agent, self)
+        evaluate_agent_against_random(boards, random_agent, self)
 
         #now = time.time()
         end_epoch = start_epoch + 100
@@ -735,7 +735,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
     the "asynchronous" part, turning it into the simpler A2C algorithm.
     """
 
-    def __init__(self, boards, model, starting_position, enabled_optional_rewards):
+    def __init__(self, boards, model, starting_position, enabled_optional_rewards, use_mcts):
         self.boards = boards
         self.starting_position = starting_position
         self.running_white_states = []
@@ -750,6 +750,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.move_reward = -1 / 100.0
         self.max_episode_length = 64
         self.mcts = MCTSGraph(self, boards)
+        self.use_mcts = use_mcts
 
     def end_episode(self):
         self.whites_move = True
@@ -785,22 +786,25 @@ class A2CMoveAgent(JLEAIMoveAgent):
 
     def decide_move(self, board_state):
         board_tensor, _, _ = board_state
-        # Choose a move
-        if self.whites_move:
-            a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_white_states, self.running_white_prob)
-            # Next to do 24/07/2026:
-            # Speed up generating graph even more, think of ways
-            # Fix any errors
-            # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
-            # Test games with white and black vs. Stockfish
-            # Randomly flip half of the states when training
-            # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
-            # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
-            # Fix the new bug around pawn promotions and expanding valid probs (may have been fixed?)
-            # Train the game value on pre-existing datasets
+        if self.use_mcts:
+            # Choose a move
+            if self.whites_move:
+                a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_white_states, self.running_white_prob)
+                # Next to do 24/07/2026:
+                # Speed up generating graph even more, think of ways
+                # Fix any errors
+                # Handling of draws by threefold repetition and 50 move rule will need to be decided with a meta-layer, since they are ignored during exploration.
+                # Test games with white and black vs. Stockfish
+                # Randomly flip half of the states when training
+                # Save visualisations of the graph structure, including the probabilities and main constants per move. Test with mate in 1 and mate in 2 situations, and situations that look favourable for black.
+                # For ^, Treelib/Graphvis? https://stackoverflow.com/questions/7670280/tree-plotting-in-python
+                # Fix the new bug around pawn promotions and expanding valid probs (may have been fixed?)
+                # Train the game value on pre-existing datasets
+            else:
+                a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
+            self.boards.update_batch_size(1)  # To be safe.
         else:
-            a2c_move, a2c_promotion = self._decide_move_for_player(board_tensor, self.running_black_states, self.running_black_prob)
-        self.boards.update_batch_size(1)  # To be safe.
+            a2c_move, a2c_promotion = self.model.get_simple_max_moves(board_tensor)
         return (a2c_move, a2c_promotion)
 
     def prepare_for_training(self):
@@ -895,7 +899,7 @@ def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):
     assert boards.get_batch_size() == 1
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
-    our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
+    our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, True)
     our_ai_agent.prepare_for_training()
 
     while num_logged_games < TOTAL_DESIRED_LOGGED_GAMES_A2C:
@@ -926,7 +930,7 @@ def multi_threaded_a2c_process(proc_num, model_state, artifacts_dir, board_setup
     batched_board = boards.to_tensor().cuda()
     starting_position = batched_board[0].clone()
     model = A2CChessNetwork(model_state=model_state)
-    our_ai_agent = A2CMoveAgent(boards, model, starting_position, {})
+    our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, True)
     our_ai_agent.prepare_for_training()
     major_outcomes, colour_list, states, moves, promotions = our_ai_agent.self_play_session()
     # total_games should refer to the finished game count before any processes are started.
