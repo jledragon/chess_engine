@@ -888,6 +888,7 @@ class A2CMoveAgent(JLEAIMoveAgent):
     def train_on_loaded_data(self, memory):
         self.model.set_train_mode()
         self.model.train_on_data(0, memory)
+        self.model.save_models("last_model_plus")
 
 
 def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):

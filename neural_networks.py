@@ -669,36 +669,25 @@ class A2CChessNetwork:
         pred_act, pred_prom, pred_value = self.get_model_move_and_state(state[:,:6,:,:])
         move_layer = chess_cpp.get_moves_for_player(state)
         cross_entropy_total = 0
+        kl_total = 0
+        kl_lambda = 1e-4
         _, _, action_probs = self.get_mcts_moves(state, pred_act, pred_prom, move_layer)
         valid_batches = 0
-
-        """
-        # TODO - incorporate this.
-        # Policy loss: cross-entropy between predicted and target policy
-        loss_p = -(batch_pi * F.log_softmax(logits, dim=1)).sum(dim=1).mean()
-
-        # Value loss: MSE between predicted and target value
-        loss_v = F.mse_loss(val, batch_z)
-
-        # KL divergence regularization to prevent overconfident predictions
-        kl_loss = F.kl_div(F.log_softmax(logits, dim=1), batch_pi, reduction='batchmean')
-        """
 
         for i, ap in enumerate(action_probs):
             ap_logits = torch.logit(ap)
             if not len(ap) == 1 and torch.all(torch.isfinite(ap_logits)):
                 # In cases there there was not only one move.
                 valid_batches += 1
-                # Can use either F.kl_div or F.cross_entropy. Remember to use
-                # logits with cross entropy and ap.log() with KL divergence.
-                cross_entropy_total = cross_entropy_total + F.kl_div(ap.log(), graph_probs[i])
+                cross_entropy_total = cross_entropy_total -(graph_probs[i] * F.log_softmax(ap_logits, dim=0)).sum()
+                kl_total = kl_total + F.kl_div(F.log_softmax(ap_logits, dim=0), graph_probs[i], reduction='batchmean')
         if valid_batches > 0:
             cross_entropy_mean = cross_entropy_total / valid_batches
         else:
             cross_entropy_mean = 0  # safety
         reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
-        combined_loss = cross_entropy_mean + reward_loss
-        print(f"Cross entropy loss: {cross_entropy_mean}, Reward loss: {reward_loss}")
+        combined_loss = cross_entropy_mean + reward_loss + kl_lambda * kl_total
+        print(f"Cross entropy loss: {cross_entropy_mean}, Reward loss: {reward_loss}, KL loss: {kl_total}")
         self.optimiser.zero_grad()
         combined_loss.backward()
         self.optimiser.step()
@@ -739,11 +728,11 @@ class A2CChessNetwork:
                 raise e
         return current_epoch
 
-    def save_models(self):
+    def save_models(self, name="last_model"):
         torch.save({
             "model_state": self.chess_network.state_dict(),
             "optimiser_state": self.optimiser.state_dict(),
-        }, 'models/last_model')
+        }, f'models/{name}')
     
     def load_models(self, purpose):
         if not os.path.exists('models/last_model'):
