@@ -1,3 +1,5 @@
+** Work in progress - this project is still unfinished and a fuller README.md is coming eventually. **
+
 The simplest way to run this is to run:
 
 ```
