@@ -12,3 +12,4 @@ stockfish-windows-x86-64-avx2/
 stockfish/
 models/
 datasets/
+real_games/

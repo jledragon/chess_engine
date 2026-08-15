@@ -187,19 +187,19 @@ if __name__ == '__main__':
         assert boards.get_batch_size() == 256
     elif args.algorithm == "A2C":
         model = A2CChessNetwork()
-        memory = A2CGameMemory(10_000, 256)
+        memory = A2CGameMemory(256)
         our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, True)
         assert boards.get_batch_size() == 1
     elif args.algorithm == "A2C-no-MCTS":
         model = A2CChessNetwork()
-        memory = A2CGameMemory(10_000, 256)
+        memory = A2CGameMemory(256)
         our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, False)
         assert boards.get_batch_size() == 256
     memory.load_data()
     if args.train_further:
         model.load_models('train')
         #our_ai_agent.analyse_loaded_data_and_models()  # Debugging
-        our_ai_agent.train_on_loaded_data(memory)
+        our_ai_agent.train_on_loaded_data(memory, 'latest')
     else:
         model.load_models('eval')
     our_ai_agent.prepare_for_evaluation()

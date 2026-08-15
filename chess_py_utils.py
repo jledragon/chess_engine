@@ -131,10 +131,10 @@ def get_repetition_status(boards, batched_board):
 @conditional_compile
 def get_single_board_encoding(batched_board):
     assert batched_board.shape[0] == 1, "Only boards with batch size 1 are supported."
-    p64 = torch.ones((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
-    p128 = torch.zeros((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).cuda()
+    p64 = torch.ones((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).to(batched_board.device)
+    p128 = torch.zeros((batched_board.shape[0], 1, batched_board.shape[2], batched_board.shape[3])).to(batched_board.device)
     char_pos = torch.cat((batched_board[:, 0:6, :, :], p64, p128), dim=1)
-    sq_num = torch.arange(0, 8).cuda()
+    sq_num = torch.arange(0, 8).to(batched_board.device)
     power_mask = torch.pow(2, sq_num).unsqueeze(1).unsqueeze(1).unsqueeze(0)
     compact_pos = torch.sum(char_pos * power_mask, 1).to(torch.int8).cpu()
     board_encoding = chess_cpp.get_board_encoding(compact_pos, 0)  # Just check the first element
@@ -391,6 +391,48 @@ def convert_UCI_to_jle_notation(move, invert):
     if len(move) > 4:
         jle_promotion[_promotion_indices[move[4]]] = 1
     return jle_move, jle_promotion
+
+def convert_fen_to_jle_board(fen_str):
+    try:
+        fen_parts = fen_str.split(" ")
+        pos_str = fen_parts[0]
+        pos_rows = pos_str.split("/")
+        white = True
+        if fen_parts[1] == 'b':
+            row_range = range(7, -1, -1)
+            white = False
+        elif fen_parts[1] == 'w':
+            row_range = range(8)
+    except:
+        raise ValueError("Input is not in expected fen format.")
+
+    blank_board = torch.zeros((1, 6, 8, 8)).to(torch.int8)
+    for row in row_range:
+        pos_row = pos_rows[row]
+        ci = 0
+        for row_char in pos_row:
+            if not row_char.isnumeric():
+                ci_ = ci if white else 7 - ci
+                if not row_char.islower():
+                    blank_board[0, 5, row, ci_] = 1
+                if row_char.lower() == 'p':
+                    blank_board[0, 0, row, ci_] = 1
+                elif row_char.lower() == 'n':
+                    blank_board[0, 1, row, ci_] = 1
+                elif row_char.lower() == 'b':
+                    blank_board[0, 2, row, ci_] = 1
+                elif row_char.lower() == 'r':
+                    blank_board[0, 3, row, ci_] = 1
+                elif row_char.lower() == 'q':
+                    blank_board[0, 2, row, ci_] = 1
+                    blank_board[0, 3, row, ci_] = 1
+                elif row_char.lower() == 'k':
+                    blank_board[0, 4, row, ci_] = 1
+            else:
+                c_skip = int(row_char) - 1
+                ci += c_skip
+            ci += 1
+    return blank_board
 
 def projection_fn(from_row, from_col, to_row, to_col):
     return from_row * 8**3 + from_col * 8**2 + to_row * 8 + to_col

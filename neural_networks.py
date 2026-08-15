@@ -692,6 +692,14 @@ class A2CChessNetwork:
         combined_loss.backward()
         self.optimiser.step()
 
+    def update_network_val_only(self, state, final_game_value):
+        _, _, pred_value = self.get_model_move_and_state(state[:,:6,:,:])
+        reward_loss = F.mse_loss(torch.squeeze(pred_value, 1), final_game_value)
+        print(f"Reward loss: {reward_loss}")
+        self.optimiser.zero_grad()
+        reward_loss.backward()
+        self.optimiser.step()
+
     def set_train_mode(self):
         self.chess_network.set_train_mode()
         self.train_mode = True
@@ -717,9 +725,14 @@ class A2CChessNetwork:
     def train_on_data(self, start_epoch, memory):
         print(f"Training for {self.num_iters_to_train} iterations...")
         for current_epoch in range(start_epoch, start_epoch + self.num_iters_to_train):
-            states, mcts_probs, game_vals = memory.sample_training_batch()
+            training_data = memory.sample_training_batch()
             try:
-                self.update_network(states, mcts_probs, game_vals)
+                if memory.val_only_mode:
+                    states, game_vals = training_data
+                    self.update_network_val_only(states, game_vals)
+                else:
+                    states, mcts_probs, game_vals = training_data
+                    self.update_network(states, mcts_probs, game_vals)
             except Exception as e:
                 # Training seems to be error prone - save models and data if an error occurred
                 print("Something went wrong during training...")
@@ -727,6 +740,30 @@ class A2CChessNetwork:
                 self.save_models()
                 raise e
         return current_epoch
+
+    def eval_on_data(self, memory):
+        total_rmse = 0
+        total_mae = 0
+        data_size = memory.state_buffer.shape[0]
+        loops = 0
+        for i in range(0, data_size, memory.training_batch_size):
+            if i + memory.training_batch_size > data_size:
+                end = data_size
+            else:
+                end = i + memory.training_batch_size
+            selected_states = memory.state_buffer[i:end].cuda()
+            targ_values = memory.game_value_buffer[i:end].cuda()
+            _, _, pred_values = self.get_model_move_and_state(selected_states[:,:6,:,:])
+            pred_values = pred_values[:,0]
+            size = end - i
+            rmse = torch.sqrt(((pred_values - targ_values)**2).sum() / size)
+            mae = torch.abs(pred_values - targ_values).sum()
+            total_rmse += rmse
+            total_mae += mae
+            loops += 1
+        mean_mse = total_rmse / loops
+        mean_mae = total_mae / data_size
+        print(f"Test RMSE: {mean_mse}, test MAE: {mean_mae}")
 
     def save_models(self, name="last_model"):
         torch.save({

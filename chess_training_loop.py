@@ -57,7 +57,7 @@ if __name__ == '__main__':
         # Recommended batch size = 256
     elif args.algorithm == "A2C":
         model = A2CChessNetwork()
-        memory = A2CGameMemory(100_000, TRAINING_BATCH_SIZE)
+        memory = A2CGameMemory(TRAINING_BATCH_SIZE)
         now_str = dt.now().strftime("%Y-%m-%d_%H-%M-%S")
         artifacts_dir = Path('.') / args.artifacts_dir / now_str
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +65,7 @@ if __name__ == '__main__':
     elif args.algorithm == "A2C-MP":
         # To kill all processes mid-flight, run taskkill /im python.exe /f /t
         model = A2CChessNetwork()
-        memory = A2CGameMemory(100_000, TRAINING_BATCH_SIZE)
+        memory = A2CGameMemory(TRAINING_BATCH_SIZE)
         now_str = dt.now().strftime("%Y-%m-%d_%H-%M-%S")
         artifacts_dir = Path('.') / args.artifacts_dir / now_str
         artifacts_dir.mkdir(parents=True, exist_ok=True)

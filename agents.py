@@ -28,6 +28,7 @@ from chess_py_utils import (
     get_game_value_for_white,
     save_full_game_artifacts,
     flip_states,
+    get_single_board_encoding,
     #get_moves_for_player_with_reuse
 )
 
@@ -656,55 +657,68 @@ class MCTSGraph:
 
 class A2CGameMemory:
     # Works very similarly to DQNExperienceBuffer
-    def __init__(self, max_size, batch_size):
-        self.max_size = max_size
+    def __init__(self, batch_size, val_only_mode=False):
         self.state_buffer = torch.empty((0, 8, 8, 8)).to(torch.int8)
         self.num_times_seen = torch.empty((0)).to(torch.int32)
         self.mcts_prob_buffer = []  # Variable size
         self.game_value_buffer = torch.empty((0)).to(torch.float32)
+        self.added_data = {}  # Contains added data, which is transferred to the other tensors at training time.
         self.training_batch_size = batch_size
-        self.once = torch.ones((1)).to(torch.int8)
+        self.once = torch.ones((1)).to(torch.int32)
         self.augment_data = False
-
-    def _append(self, begin, states, mcts_probs, game_val, num_times):
-        game_val_template = torch.ones((states.shape[0])).to(torch.float32) * game_val
-        self.state_buffer = torch.cat((self.state_buffer[begin:], states), dim=0)
-        self.game_value_buffer = torch.cat((self.game_value_buffer[begin:], game_val_template), dim=0)
-        self.num_times_seen = torch.cat((self.num_times_seen[begin:], num_times), dim=0)
-        self.mcts_prob_buffer = self.mcts_prob_buffer + mcts_probs
+        self.data_needs_regenerating = False  # When training, we want a contiguous tensor to sample from.
+        # When we add new data, this needs regenerating just in time to sample training data.
+        self.val_only_mode = val_only_mode
 
     def add_to_memory(self, state, mcts_probs, game_val):
-        # Delete the starting indices when memory gets too large
-        if self.state_buffer.shape[0] > self.max_size:
-            begin = self.state_buffer.shape[0] - self.max_size
-        else:
-            begin = 0
-        for del_index in range(begin):
-            self.mcts_prob_buffer.pop(0)
-        if self.state_buffer.shape[0] == 0:
-            self._append(begin, state, mcts_probs, game_val, torch.ones((state.shape[0])).to(torch.int8))
-        else:
-            flattened_buffer = self.state_buffer.reshape(self.state_buffer.shape[0], -1)
-            for move_ind in range(0, state.shape[0]):
-                state_i = state[move_ind].reshape(1, -1)
-                matches = torch.all(torch.where(flattened_buffer == state_i, True, False), dim=1)
-                match_ind = torch.argwhere(matches).flatten()
-                if match_ind.shape[0] == 0:
-                    self._append(begin, state[move_ind:move_ind+1], [mcts_probs[move_ind]], game_val, self.once)
-                else:
-                    mi = match_ind[0]
-                    self.game_value_buffer[mi] = self.game_value_buffer[mi] + game_val
-                    self.num_times_seen[mi] = self.num_times_seen[mi] + 1
-                    self.mcts_prob_buffer[mi] = self.mcts_prob_buffer[mi] + mcts_probs[move_ind]
+        self.data_needs_regenerating = True
+        # O(1) insert and O(n) to create the buffers once just in time for training.
+        for state_i in range(state.shape[0]):
+            state_ = state[state_i:state_i+1,:,:,:]
+            state_encoding = get_single_board_encoding(state_)
+            if state_encoding in self.added_data:
+                _, mcts_probs_, game_val_, num_times_seen = self.added_data[state_encoding]
+                self.added_data[state_encoding] = (
+                    state_,
+                    mcts_probs[state_i] + mcts_probs_,
+                    game_val + game_val_,
+                    num_times_seen + 1
+                )
+            else:
+                self.added_data[state_encoding] = (
+                    state_, mcts_probs[state_i], game_val, self.once
+                )
+
+    def regenerate_data(self):
+        state_buffer = []
+        mcts_prob_buffer = []
+        game_value_buffer = []
+        num_times_seen_buffer = []
+        for data_bundle in self.added_data.values():
+            state, mcts_probs, game_val, num_times_seen = data_bundle
+            state_buffer.append(state)
+            mcts_prob_buffer.append(mcts_probs)
+            game_value_buffer.append(game_val)
+            num_times_seen_buffer.append(num_times_seen)
+        self.state_buffer = torch.cat(state_buffer)
+        self.mcts_prob_buffer = mcts_prob_buffer
+        self.game_value_buffer = torch.cat(game_value_buffer)
+        self.num_times_seen = torch.cat(num_times_seen_buffer)
 
     def sample_training_batch(self):
+        if self.data_needs_regenerating:
+            self.regenerate_data()
+            self.data_needs_regenerating = False
         rand_sample_indices = torch.randint(low=0, high=self.state_buffer.shape[0], size=(self.training_batch_size,))
         states = self.state_buffer[rand_sample_indices].cuda()
         if self.augment_data:
             states = flip_states(states)
-        mcts_probs = [self.mcts_prob_buffer[ind].cuda() / self.num_times_seen[ind].cuda() for ind in rand_sample_indices]
         game_vals = self.game_value_buffer[rand_sample_indices].cuda() / self.num_times_seen[rand_sample_indices].cuda()
-        return states, mcts_probs, game_vals
+        if self.val_only_mode:
+            return states, game_vals
+        else:
+            mcts_probs = [self.mcts_prob_buffer[ind].cuda() / self.num_times_seen[ind].cuda() for ind in rand_sample_indices]
+            return states, mcts_probs, game_vals
 
     def save_data(self):
         data_map = {
@@ -715,12 +729,23 @@ class A2CGameMemory:
         }
         torch.save(data_map, "datasets/latest.pt")
 
-    def load_data(self):
-        loaded = torch.load("datasets/latest.pt")
+    def load_data(self, name):
+        print("Loading data...")
+        loaded = torch.load(f"datasets/{name}.pt")
         self.state_buffer = loaded["state_buffer"]
-        self.mcts_prob_buffer = loaded["mcts_prob_buffer"]
+        if self.val_only_mode:
+            self.mcts_prob_buffer = None
+            mcts_prob_buffer = [torch.zeros((1)) for _ in range(self.state_buffer.shape[0])]  # Dummy
+        else:
+            self.mcts_prob_buffer = loaded["mcts_prob_buffer"]
+            mcts_prob_buffer = self.mcts_prob_buffer
         self.game_value_buffer = loaded["game_value_buffer"]
         self.num_times_seen = loaded["num_times_seen"]
+        self.added_data.clear()
+        # Renegerate the set also, to support adding more data without overwriting loaded data.
+        self.add_to_memory(self.state_buffer, mcts_prob_buffer, self.game_value_buffer)
+        self.data_needs_regenerating = False
+        print("Data loaded.")
 
     def save_game_to_memory(self, true_game_value, running_white_states, running_black_states, running_white_prob, running_black_prob):
         w_states_this_game = torch.cat(running_white_states, dim=0)
@@ -890,6 +915,10 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.model.train_on_data(0, memory)
         self.model.save_models("last_model_plus")
 
+    def eval_on_loaded_data(self, memory):
+        self.model.set_test_mode()
+        self.model.eval_on_data(memory)
+
 
 def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):
     num_logged_games = 0
@@ -948,7 +977,7 @@ def train_multi_threaded_a2c(artifacts_dir, model, memory, board_setup):
     num_logged_games = 0
     total_games = 0
     current_training_epoch = 0
-    num_processes = 4  # 4 for full, 12 for simplified
+    num_processes = 8  # 4 for full, 12 for simplified
     train_inc = 1
     agent_pool = mp.Pool(processes=num_processes)
     current_model_state = None
