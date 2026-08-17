@@ -39,7 +39,7 @@ class TestMCTS(unittest.TestCase):
 
         model = A2CChessNetwork()
         model.set_test_mode()
-        our_ai_agent = A2CMoveAgent(boards, model, batched_board, {})
+        our_ai_agent = A2CMoveAgent(boards, model, batched_board, {}, True)
         white_mcts = MCTSGraph(our_ai_agent, boards)
         # From this position, white has 27 valid moves. Set this value high enough
         # to reach terminal states - White can play mate in one.
@@ -78,7 +78,7 @@ class TestMCTS(unittest.TestCase):
 
         model = A2CChessNetwork()
         model.set_test_mode()
-        our_ai_agent = A2CMoveAgent(boards, model, batched_board, {})
+        our_ai_agent = A2CMoveAgent(boards, model, batched_board, {}, True)
         white_mcts = MCTSGraph(our_ai_agent, boards)
         # From this position, white has 27 valid moves. Set this value high enough
         # to reach terminal states - White can play mate in one.

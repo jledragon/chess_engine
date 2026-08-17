@@ -15,7 +15,7 @@ import chess_cpp
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Parameters for creating datasets from real games.')
+    parser = argparse.ArgumentParser(description='Parameters training and testing the value part of A2C.')
     parser.add_argument(
         'train_set',
         type=str,
@@ -53,10 +53,10 @@ if __name__ == '__main__':
     our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, False)
     our_ai_agent.train_on_loaded_data(memory)
     print("Eval metrics on training data:")
-    our_ai_agent.eval_on_loaded_data(memory)
+    our_ai_agent.eval_val_on_loaded_data(memory)
 
     # test
     our_ai_agent.prepare_for_evaluation()
     memory.load_data(args.test_set)
     print("Eval metrics on test data:")
-    our_ai_agent.eval_on_loaded_data(memory)
+    our_ai_agent.eval_val_on_loaded_data(memory)

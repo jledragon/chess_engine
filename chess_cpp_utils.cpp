@@ -31,6 +31,8 @@ void expandValidProbs(torch::Tensor valid_probs, torch::Tensor newValidProbs, to
 const int num_rows = 8;
 const int num_cols = 8;
 const int pos_encoding = 6;
+// The final two bits indicate whether a piece is on its first move
+// And whether it has just made its first move.
 const int bits_per_piece = pos_encoding + 2;
 
 //// Pieces - For human readability and testing only.

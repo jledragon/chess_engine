@@ -393,6 +393,7 @@ def convert_UCI_to_jle_notation(move, invert):
     return jle_move, jle_promotion
 
 def convert_fen_to_jle_board(fen_str):
+    # Deprecated for actual use anywhere, but may prove useful in the future.
     try:
         fen_parts = fen_str.split(" ")
         pos_str = fen_parts[0]
@@ -523,6 +524,10 @@ def get_mode_str(mode):
             return "puzzle"
 
 def get_human_readable_board(single_board_element, as_white):
+    # If reading the tensor printed directly, read a-h left to right and 1-8 top to bottom.
+    # Note - this gives an upside down, mirror image chess board than one you'd expect to see in chess!
+    if len(single_board_element.shape) == 4:
+        single_board_element = single_board_element[0]
     if as_white:
         board_str = Template(
             """
@@ -573,7 +578,7 @@ def get_human_readable_board(single_board_element, as_white):
     for col in range(0, 8):
         for row in range(0, 8):
             letter = " "
-            if single_board_element[5][col][row] == 1:
+            if single_board_element[5][col][row] == 0:
                 # White gets capitals, black gets lower case.
                 if single_board_element[0][col][row] == 1:
                     letter = 'p' if as_white else 'P'
@@ -600,5 +605,6 @@ def get_human_readable_board(single_board_element, as_white):
                     letter = 'R' if as_white else 'r'
                 elif single_board_element[4][col][row] == 1:
                     letter = 'K' if as_white else 'k'
-            subst_dict[f"{_cols[row]}{col + 1}"] = letter
+            flip_col = 8 - col
+            subst_dict[f"{_cols[row]}{flip_col}"] = letter
     return board_str.substitute(subst_dict)

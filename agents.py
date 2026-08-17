@@ -915,9 +915,9 @@ class A2CMoveAgent(JLEAIMoveAgent):
         self.model.train_on_data(0, memory)
         self.model.save_models("last_model_plus")
 
-    def eval_on_loaded_data(self, memory):
+    def eval_val_on_loaded_data(self, memory):
         self.model.set_test_mode()
-        self.model.eval_on_data(memory)
+        self.model.eval_val_on_data(memory)
 
 
 def train_single_threaded_a2c(artifacts_dir, model, memory, board_setup):

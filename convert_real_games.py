@@ -15,8 +15,29 @@ import torch
 import pandas as pd
 import chess
 import argparse
-from chess_py_utils import convert_fen_to_jle_board
+from chess_py_utils import convert_UCI_to_jle_notation
 from agents import A2CGameMemory
+from interface import JLEAIMoveAgent
+import chess_cpp
+
+
+class PredestinedMoveAgent(JLEAIMoveAgent):
+    """
+    A move agent that has no logic of its own, but will only read and enact moves in
+    pre-played games.
+    """
+    def __init__(self, boards, starting_position):
+        self.boards = boards
+        self.starting_position = starting_position
+
+    def decide_move(self, board_state):
+        pass
+
+    def prepare_for_training(self):
+        pass
+
+    def prepare_for_evaluation(self):
+        pass
 
 
 def get_args():
@@ -45,6 +66,7 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
+    assert torch.cuda.is_available(), "CUDA is not enabled. Please fix this before running this script."
     all_games = pd.read_csv("real_games/games.csv")
     valid_games = all_games[(all_games["victory_status"] == 'mate') | (all_games["insufficient material"] == True) | (all_games["stalemate"] == True)]
     print(f"Seen {valid_games.shape[0]} valid games to work with.")
@@ -53,13 +75,18 @@ if __name__ == '__main__':
     if args.start + args.end > valid_games.shape[0]:
         print(f"Warning - This process will gain fewer than {args.end} games.")
     memory = A2CGameMemory(256)
+
     for tot, (index, game) in enumerate(valid_games.iloc[args.start:].iterrows()):
         converted_games_w = []
         converted_games_b = []
-        turn = True # white
+        jle_board_generator = chess_cpp.BatchedBoard(True, 1, 0)
+        jle_board = jle_board_generator.to_tensor().cuda()
+        agent = PredestinedMoveAgent(jle_board_generator, jle_board)
+        colour_list = torch.ones((1)).to(torch.bool).cuda()
+        dud_move_count = jle_board_generator.get_starting_move_count_list().cuda()
+        turn = True  # For readability. True = white, False = black.
+
         standard_board = chess.Board()
-        fen_str = standard_board.fen()
-        jle_board = convert_fen_to_jle_board(fen_str)
         moves_this_game = game["moves"]
         winner = game["winner"]
         if winner == 'white':
@@ -69,18 +96,26 @@ if __name__ == '__main__':
         else:
             assert winner == 'draw'
             value = torch.Tensor([0]).to(torch.float32)
-        converted_games_w.append(jle_board)
+        converted_games_w.append(jle_board)  # What white sees before they select a move
 
         individual_moves = moves_this_game.split(" ")
         for move in individual_moves:
-            turn = not turn
+            # Retain standard chess boards and JLE chess boards in lock step with another. This is so that
+            # we can both translate standard notation and get the full 8-bit encoding, which we'll need
+            # for other scripts.
+            uci_move = standard_board.parse_san(move).uci()
+            jle_move = convert_UCI_to_jle_notation(uci_move, torch.logical_not(colour_list))
+            board_state = (jle_board, colour_list, dud_move_count)
+            _, new_state = agent.enact_move(jle_move, board_state)
+            dud_move_count, jle_board, colour_list, _, _ = new_state
             standard_board.push_san(move)
-            fen_str = standard_board.fen()
-            jle_board = convert_fen_to_jle_board(fen_str)
+            if standard_board.is_checkmate() or standard_board.is_insufficient_material() or standard_board.is_stalemate():
+                break
             if turn:
-                converted_games_w.append(jle_board)
+                converted_games_w.append(jle_board)  # What white sees before they select a move
             else:
-                converted_games_b.append(jle_board)
+                converted_games_b.append(jle_board)  # What black sees before they select a move
+            turn = not turn
 
         converted_games_w = torch.cat(converted_games_w)
         converted_games_b = torch.cat(converted_games_b)

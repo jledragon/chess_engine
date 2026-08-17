@@ -741,7 +741,7 @@ class A2CChessNetwork:
                 raise e
         return current_epoch
 
-    def eval_on_data(self, memory):
+    def eval_val_on_data(self, memory):
         total_rmse = 0
         total_mae = 0
         data_size = memory.state_buffer.shape[0]
