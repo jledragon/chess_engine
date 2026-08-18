@@ -47,4 +47,4 @@ def evaluate_agent_against_random(boards, random_agent, our_ai_agent):
         #print(games_played)
     print(f"Win count: {win_count} ({win_count / games_played * 100}%), "
           f"Lose count: {lose_count} ({lose_count / games_played * 100}%), "
-          f"Draw count: {draw_count} ({draw_count / games_played * 100}%), ")
+          f"Draw count: {draw_count} ({draw_count / games_played * 100}%)")

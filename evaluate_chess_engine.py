@@ -195,8 +195,8 @@ if __name__ == '__main__':
         memory = A2CGameMemory(256)
         our_ai_agent = A2CMoveAgent(boards, model, starting_position, {}, False)
         assert boards.get_batch_size() == 256
-    memory.load_data()
     if args.train_further:
+        memory.load_data('latest')
         model.load_models('train')
         #our_ai_agent.analyse_loaded_data_and_models()  # Debugging
         our_ai_agent.train_on_loaded_data(memory, 'latest')
