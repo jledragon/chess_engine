@@ -48,11 +48,18 @@ if __name__ == '__main__':
     memory.load_data(args.file_name)
 
     for i in range(memory.state_buffer.shape[0]):
+        # Load the data, generate the graph
         board_i = memory.state_buffer[i:i+1,:,:,:].cuda()
-        print(board_i.shape)
         our_ai_agent = A2CMoveAgent(boards, model, board_i, {}, False)
+        our_ai_agent.prepare_for_evaluation()
         white_mcts = MCTSGraph(our_ai_agent, boards)
         move_layer = chess_cpp.get_moves_for_player(board_i)
         white_mcts.init_top_node_if_empty_graph(board_i, move_layer)
-        white_mcts.generate_graph(not args.disallow_noise)  # Allow some noise to be added.
+        white_mcts.generate_graph(not args.disallow_noise)
+
+        # Get the probability distribution
+        child_n_values = [child.N for child in white_mcts.top_node.children]
+        temperature_values = [(n / white_mcts.top_node.N) ** white_mcts.top_node.temperature for n in child_n_values]
+        sum_temp = sum(temperature_values)
+        norm_temp = [t / sum_temp for t in temperature_values]
         assert False

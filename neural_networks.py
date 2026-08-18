@@ -763,7 +763,7 @@ class A2CChessNetwork:
             loops += 1
         mean_mse = total_rmse / loops
         mean_mae = total_mae / data_size
-        print(f"Test RMSE: {mean_mse}, test MAE: {mean_mae}")
+        print(f"RMSE: {mean_mse}, MAE: {mean_mae}")
 
     def save_models(self, name="last_model"):
         torch.save({

@@ -96,7 +96,7 @@ if __name__ == '__main__':
         else:
             assert winner == 'draw'
             value = torch.Tensor([0]).to(torch.float32)
-        converted_games_w.append(jle_board)  # What white sees before they select a move
+        converted_games_w.append(jle_board.clone())  # What white sees before they select a move
 
         individual_moves = moves_this_game.split(" ")
         for move in individual_moves:
@@ -112,9 +112,9 @@ if __name__ == '__main__':
             if standard_board.is_checkmate() or standard_board.is_insufficient_material() or standard_board.is_stalemate():
                 break
             if turn:
-                converted_games_w.append(jle_board)  # What white sees before they select a move
+                converted_games_w.append(jle_board.clone())  # What white sees before they select a move
             else:
-                converted_games_b.append(jle_board)  # What black sees before they select a move
+                converted_games_b.append(jle_board.clone())  # What black sees before they select a move
             turn = not turn
 
         converted_games_w = torch.cat(converted_games_w)
