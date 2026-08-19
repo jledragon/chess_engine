@@ -199,7 +199,7 @@ if __name__ == '__main__':
         memory.load_data('latest')
         model.load_models('train')
         #our_ai_agent.analyse_loaded_data_and_models()  # Debugging
-        our_ai_agent.train_on_loaded_data(memory, 'latest')
+        our_ai_agent.train_on_loaded_data(memory)
     else:
         model.load_models('eval')
     our_ai_agent.prepare_for_evaluation()

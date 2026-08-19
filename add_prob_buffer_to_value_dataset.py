@@ -108,3 +108,7 @@ if __name__ == '__main__':
         data_map["a2c_prob_distribution"] = a2c_prob_distribution
         torch.save(data_map, mcts_tmp)  # Do this regularly.
     agent_pool.close()
+
+    a2c_prob_distribution = a2c_prob_distribution[0:memory.state_buffer.shape[0]]
+    memory.mcts_prob_buffer = a2c_prob_distribution
+    memory.save_data()
